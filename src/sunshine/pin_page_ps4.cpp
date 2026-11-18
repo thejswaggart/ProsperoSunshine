@@ -4,6 +4,7 @@
 // Until the PS5 web page (src/web/) is ported it is the only way to pair. It answers the console itself and the LAN only,
 // never the internet: the PIN is the only thing that guards a pairing.
 #include "sunshine/pin_page_ps4.hpp"
+#include "src/config.h"
 #include "src/logging.h"
 #include "src/network.h"
 #include "src/nvhttp.h"
@@ -92,6 +93,9 @@ std::optional<nlohmann::json> json_body(const request_t &request) {
 void run_pin_page(std::stop_token stop, uint16_t port) {
     http_server server;
     server.config.port = port;
+    // As nvhttp binds: without an address Simple-Web-Server takes the IPv6 wildcard, which on the console's FreeBSD
+    // kernel accepts no IPv4 connections, so the page listened and nobody on an IPv4 network reached it.
+    server.config.address = net::get_bind_address(net::af_from_enum_string(config::sunshine.address_family));
     // nvhttp::pin() waits for Moonlight to finish the handshake: a second thread keeps the list answering meanwhile.
     server.config.thread_pool_size = 2;
     server.resource["^/$"]["GET"] = lan_only([](response_t response, request_t) {

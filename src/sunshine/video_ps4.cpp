@@ -117,7 +117,16 @@ void capture(safe::mail_t mail, config_t config, stream::session_t *channel_data
 
     const auto settings = read_replay_settings();
     prospero::CaptureSession session(std::make_unique<prospero::ReplayBackend>(settings.file, settings.fps));
-    if (const int rc = session.start()) {
+    // The session's frame buffer is 4 MB, and a payload's heap is small: out of memory ends this stream, not the host.
+    int start_rc = -1;
+    try {
+        start_rc = session.start();
+    } catch (const std::bad_alloc &) {
+        BOOST_LOG(error) << "PS4 capture: out of memory opening the capture, ending the stream"sv;
+        shutdown_event->raise(true);
+        return;
+    }
+    if (const int rc = start_rc) {
         BOOST_LOG(error) << "PS4 capture: "sv << settings.file.string()
                          << " can't be replayed (missing, or no SPS, PPS or IDR in it): "sv << rc;
         shutdown_event->raise(true);

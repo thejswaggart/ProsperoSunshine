@@ -3,6 +3,7 @@
 #include "capture/capture_session.hpp"
 #include <cassert>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <vector>
 using namespace std::chrono_literals;
@@ -37,7 +38,7 @@ ReplayBackend::clock::time_point fake_now;
 ReplayBackend::clock::time_point now() { return fake_now; }
 
 int read_one(ReplayBackend &backend, bytes &out) {
-    out.assign(1 << 16, 0);
+    out.assign(prospero::CaptureSession::max_frame_bytes, 0);
     uint8_t descriptor[0x88];
     const int n = backend.read(out.data(), out.size(), descriptor);
     out.resize(n > 0 ? static_cast<size_t>(n) : 0);
@@ -115,6 +116,55 @@ void refuses_unplayable() {
     assert(read_one(missing, frame) == -1);
 }
 
+std::filesystem::path write_temp(const bytes &stream, const char *name) {
+    const auto path = std::filesystem::temp_directory_path() / name;
+    std::ofstream(path, std::ios::binary).write(reinterpret_cast<const char *>(stream.data()), static_cast<std::streamsize>(stream.size()));
+    return path;
+}
+
+// Every unit the backend hands out, in order, until the first one comes round again.
+std::vector<bytes> play_once(ReplayBackend &backend) {
+    std::vector<bytes> out;
+    bytes frame;
+    for (size_t i = 0; i < backend.unit_count(); ++i) {
+        fake_now += 1s;
+        assert(read_one(backend, frame) > 0);
+        out.push_back(frame);
+    }
+    return out;
+}
+
+// From a file the backend indexes in 1 MiB chunks and reads each unit from disk: the same units and headers as from
+// memory, also with a start code split across a chunk boundary.
+void file_matches_memory() {
+    // P slices big enough that the stream crosses several 1 MiB chunks, with one start code straddling the first boundary.
+    bytes big_p = nal(0x41, {0x9a});
+    big_p.resize(300'000, 0x55);
+    bytes stream = cat({aud, sps, pps, idr, idr_second_slice});
+    while (stream.size() < (1u << 20) - 2 - aud.size()) stream = cat({stream, aud, big_p});
+    // Pad so the next AUD's 00 00 01 starts two bytes before the boundary.
+    stream.resize((1u << 20) - 2 - 1, 0x55);
+    stream = cat({stream, aud, big_p, aud, idr, aud, big_p, aud, big_p});
+    // The 4-byte start code of that AUD sits at boundary-3..boundary: its 00 00 01 spans the first two chunks.
+    assert(stream.size() > (1u << 20) + 500'000);
+    assert(stream[(1u << 20) - 3] == 0 && stream[(1u << 20) - 1] == 0 && stream[1u << 20] == 1);
+    const auto path = write_temp(stream, "replay_backend_test.h264");
+
+    fake_now = {};
+    ReplayBackend from_memory(stream, 60), from_file(path, 60);
+    from_memory.set_clock(now);
+    from_file.set_clock(now);
+    assert(from_memory.open() == 0 && from_file.open() == 0);
+    assert(from_file.unit_count() == prospero::split_access_units(stream).size());
+    assert(from_file.unit_count() == from_memory.unit_count());
+    bytes h1(256), h2(256);
+    const int n1 = from_memory.headers(h1.data(), h1.size()), n2 = from_file.headers(h2.data(), h2.size());
+    assert(n1 > 0 && n1 == n2 && std::memcmp(h1.data(), h2.data(), static_cast<size_t>(n1)) == 0);
+    assert(play_once(from_file) == play_once(from_memory));
+    from_file.close();
+    std::filesystem::remove(path);
+}
+
 // Through CaptureSession, as video_ps4.cpp uses it: headers cached, frames delivered and IDRs flagged.
 void through_capture_session() {
     prospero::CaptureSession session(std::make_unique<ReplayBackend>(sample_stream(), 240));
@@ -135,6 +185,7 @@ int main() {
     paces_and_loops();
     keyframe_request_skips_ahead();
     refuses_unplayable();
+    file_matches_memory();
     through_capture_session();
     std::cout << "replay_backend_test: ok\n";
 }
