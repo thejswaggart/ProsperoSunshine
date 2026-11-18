@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Replaces Sunshine's video.cpp on the PS4. Like the PS5 host there is no encoder in the host: a capture backend delivers
-// H.264 and its frames go straight into the stream's packet queue. For now the backend replays a recorded file
-// (capture/replay_backend.hpp); the console's own encoder takes its place later. One stream at a time, H.264 and SDR only.
+// H.264 and its frames go straight into the stream's packet queue. The backend is the console's screen through PBS-Payload
+// (platform/ps4/pbs_backend.hpp), 720p60; ps4_capture = replay in sunshine.conf replays a recorded file instead
+// (capture/replay_backend.hpp). One stream at a time, H.264 and SDR only.
 #include "capture/capture_session.hpp"
 #include "capture/replay_backend.hpp"
+#include "platform/ps4/pbs_backend.hpp"
 #include "src/config.h"
 #include "src/file_handler.h"
 #include "src/globals.h"
@@ -30,15 +32,21 @@ std::array<bool, 3> last_encoder_probe_supported_dynamic_range_for_codec = {fals
 std::array<bool, 3> last_encoder_probe_supported_dynamic_range_yuv444_for_codec = {false, false, false};
 
 namespace {
-// What the replay backend plays: replay_file and replay_fps in sunshine.conf, else replay.h264 in the data folder at 60 fps.
-struct replay_settings {
+// Where the picture comes from, from sunshine.conf. ps4_capture: pbs (the screen, default) or replay. The replay plays
+// replay_file at replay_fps, else replay.h264 in the data folder at 60 fps.
+struct capture_settings {
+    bool replay = false;
     std::filesystem::path file;
     int fps = 60;
 };
 
-replay_settings read_replay_settings() {
-    replay_settings settings{platf::appdata() / "replay.h264", 60};
+capture_settings read_capture_settings() {
+    capture_settings settings{false, platf::appdata() / "replay.h264", 60};
     const auto conf = config::parse_config(file_handler::read_file(config::sunshine.config_file.c_str()));
+    if (const auto it = conf.find("ps4_capture"); it != conf.end()) {
+        if (it->second == "replay") settings.replay = true;
+        else if (it->second != "pbs") BOOST_LOG(warning) << "ps4_capture in sunshine.conf is pbs or replay; using pbs"sv;
+    }
     if (const auto it = conf.find("replay_file"); it != conf.end() && !it->second.empty()) settings.file = it->second;
     if (const auto it = conf.find("replay_fps"); it != conf.end()) {
         try {
@@ -71,7 +79,11 @@ struct {
 std::optional<bool> hdr_conflict(bool) { return std::nullopt; }
 
 int probe_encoders() {
-    const auto settings = read_replay_settings();
+    const auto settings = read_capture_settings();
+    if (!settings.replay) {
+        BOOST_LOG(info) << "PS4 video: the console's screen through PBS, 720p60 H.264"sv;
+        return 0;
+    }
     std::error_code ec;
     if (!std::filesystem::exists(settings.file, ec))
         BOOST_LOG(warning) << "PS4 video: "sv << settings.file.string() << " does not exist yet; streams fail until it does"sv;
@@ -86,11 +98,13 @@ void capture(safe::mail_t mail, config_t config, stream::session_t *channel_data
     auto touch_port_event = mail->event<input::touch_port_t>(mail::touch_port);
     auto hdr_event = mail->event<hdr_info_t>(mail::hdr);
 
+    const auto settings = read_capture_settings();
     BOOST_LOG(info) << "PS4 capture requested "sv << config.width << 'x' << config.height << '@' << config.framerate
-                    << (config.videoFormat ? ", but only H.264 is offered"sv : ""sv);
+                    << (config.videoFormat ? ", but only H.264 is offered"sv : ""sv)
+                    << (settings.replay ? ""sv : ", delivering 1280x720@60"sv);
     input::touch_port_t port{};
-    port.width = port.logical_width = config.width;
-    port.height = port.logical_height = config.height;
+    port.width = port.logical_width = settings.replay ? config.width : 1280;
+    port.height = port.logical_height = settings.replay ? config.height : 720;
     touch_port_event->raise(port);
     hdr_event->raise(std::make_unique<hdr_info_raw_t>(false));
 
@@ -115,8 +129,12 @@ void capture(safe::mail_t mail, config_t config, stream::session_t *channel_data
         current.released.notify_all();
     });
 
-    const auto settings = read_replay_settings();
-    prospero::CaptureSession session(std::make_unique<prospero::ReplayBackend>(settings.file, settings.fps));
+    // config.bitrate is in kbit/s; PBS takes 1000..15000.
+    const unsigned kbps = config.bitrate > 0 ? static_cast<unsigned>(std::clamp(config.bitrate, 1000, 15000)) : 10000;
+    std::unique_ptr<prospero::CaptureBackend> backend;
+    if (settings.replay) backend = std::make_unique<prospero::ReplayBackend>(settings.file, settings.fps);
+    else backend = prospero::make_pbs_capture_backend(kbps, (platf::appdata() / "pbs_capture.log").string());
+    prospero::CaptureSession session(std::move(backend));
     // The session's frame buffer is 4 MB, and a payload's heap is small: out of memory ends this stream, not the host.
     int start_rc = -1;
     try {
@@ -127,12 +145,19 @@ void capture(safe::mail_t mail, config_t config, stream::session_t *channel_data
         return;
     }
     if (const int rc = start_rc) {
-        BOOST_LOG(error) << "PS4 capture: "sv << settings.file.string()
-                         << " can't be replayed (missing, or no SPS, PPS or IDR in it): "sv << rc;
+        if (settings.replay)
+            BOOST_LOG(error) << "PS4 capture: "sv << settings.file.string()
+                             << " can't be replayed (missing, or no SPS, PPS or IDR in it): "sv << rc;
+        else
+            BOOST_LOG(error) << "PS4 capture: the screen capture didn't open: "sv << prospero::pbs_open_error(rc) << " ("sv << rc
+                             << "); pbs_capture.log has PBS's steps"sv;
         shutdown_event->raise(true);
         return;
     }
-    BOOST_LOG(info) << "PS4 capture: replaying "sv << settings.file.string() << " at "sv << settings.fps << " fps"sv;
+    if (settings.replay)
+        BOOST_LOG(info) << "PS4 capture: replaying "sv << settings.file.string() << " at "sv << settings.fps << " fps"sv;
+    else
+        BOOST_LOG(info) << "PS4 capture: screen capture open, 1280x720@60, "sv << kbps << " kbit/s"sv;
 
     int64_t next_index = 0;
     prospero::EncodedFrame frame;

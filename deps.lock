@@ -20,3 +20,5 @@ opus  1.6.1  6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1  h
 boost  1.92.0  9bed76128d4e46755dbe818487788c6fceb6f72b378f4daa49b7e1e600d9088d  https://github.com/boostorg/boost/releases/download/boost-1.92.0/boost-1.92.0-cmake.tar.xz
 ffmpeg  9.0.2  8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e  https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz
 miniupnpc  2.3.3  d52a0afa614ad6c088cc9ddff1ae7d29c8c595ac5fdd321170a05f41e634bd1a  https://github.com/miniupnp/miniupnp/releases/download/miniupnpc_2_3_3/miniupnpc-2.3.3.tar.gz
+# PS4 only (cmake/ps4.cmake): the PS4 screen capture, compiled into the PS4 host. GPL-3.0-or-later.
+pbs-payload  d66453a68a72e7061bad2bb1d0a3fd9dcb27b2c0  caf5e9748e5f887133a134a9b22870f8b16131e3bcb56f935d66d67db327037d  https://github.com/seregonwar/PBS-Payload/archive/d66453a68a72e7061bad2bb1d0a3fd9dcb27b2c0.tar.gz
