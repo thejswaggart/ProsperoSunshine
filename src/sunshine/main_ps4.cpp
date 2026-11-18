@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // The PS4 host's entry point; replaces Sunshine's main.cpp/entry_handler.cpp as main_ps5.cpp does on the PS5, with less
 // around it: the GameStream HTTP(S) and RTSP services, mDNS discovery and the pairing page. No control socket, web page,
-// UPnP or rest-mode recovery yet (main_ps5.cpp has them). It runs until the process is killed.
+// UPnP or rest-mode recovery yet (main_ps5.cpp has them). It runs until the pairing page's "Stop host" (POST /api/quit).
 #include "platform/ps5/mdns_responder.hpp"
 #include "sunshine/pin_page_ps4.hpp"
 #include "src/config.h"
@@ -18,6 +18,7 @@
 #include "src/stream.h"
 #include "src/video.h"
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <thread>
@@ -102,7 +103,9 @@ int main(int argc, char *argv[]) {
     {
         std::jthread http_thread{nvhttp::start};
         std::jthread rtsp_thread{rtsp_stream::start};
-        std::jthread pin_thread([pin_port](std::stop_token stop) { prospero::ps4::run_pin_page(stop, pin_port); });
+        std::jthread pin_thread([pin_port, shutdown_event](std::stop_token stop) {
+            prospero::ps4::run_pin_page(stop, pin_port, [shutdown_event] { shutdown_event->raise(true); });
+        });
         // Moonlight discovery; on any socket problem the responder logs and ends, the host runs on.
         std::jthread mdns_thread([name = config::nvhttp.sunshine_name](std::stop_token stop) {
             prospero::mdns::run_responder(stop, name, net::map_port(nvhttp::PORT_HTTP));
@@ -110,6 +113,14 @@ int main(int argc, char *argv[]) {
         ps_diag_log("ProsperoSunshine: host ready, pairing page on port %u\n", static_cast<unsigned>(pin_port));
         while (!shutdown_event->view(5s)) {}
         BOOST_LOG(info) << "ProsperoSunshine host shutting down"sv;
+        ps_diag_log("ProsperoSunshine: host stopping\n");
+        // A service thread that doesn't end would keep the ports, and the next host couldn't bind them: after 10 s the
+        // process ends anyway.
+        std::thread([] {
+            std::this_thread::sleep_for(10s);
+            ps_diag_log("ProsperoSunshine: host did not stop within 10 s, exiting\n");
+            std::_Exit(0);
+        }).detach();
         pin_thread.request_stop();
         mdns_thread.request_stop();
         proc::proc.terminate();
@@ -117,5 +128,7 @@ int main(int argc, char *argv[]) {
     task_pool.stop();
     task_pool.join();
     ps_diag_log("ProsperoSunshine: host stopped\n");
-    return 0;
+    // Returning from main doesn't end a payload on the PS4: the process stayed until the watchdog above ended it, 10 s
+    // later and next to the next host. The services are down and the logs written, so it ends here.
+    std::_Exit(0);
 }

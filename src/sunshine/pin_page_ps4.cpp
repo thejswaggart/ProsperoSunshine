@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // The PS4 host's pairing page: a small plain-HTTP page on the base port + 1 (47990 by default) that lists the pending
 // pairing requests and passes the PIN Moonlight shows to nvhttp::pin(), as the PS5 host's control socket does with PIN.
-// Until the PS5 web page (src/web/) is ported it is the only way to pair. It answers the console itself and the LAN only,
-// never the internet: the PIN is the only thing that guards a pairing.
+// Until the PS5 web page (src/web/) is ported it is the only way to pair. It also stops the host (POST /api/quit, the
+// PS5 control socket's QUIT), so a new build can be loaded without restarting the console. It answers the console itself
+// and the LAN only, never the internet: the PIN is the only thing that guards a pairing, and anyone on the LAN may stop
+// the host.
 #include "sunshine/pin_page_ps4.hpp"
 #include "src/config.h"
 #include "src/logging.h"
@@ -30,11 +32,19 @@ body{font-family:system-ui,sans-serif;max-width:32rem;margin:2rem auto;padding:0
 input{font-size:1.2rem;padding:.4rem;width:8rem;border:1px solid #8888;border-radius:4px}
 button{font-size:1rem;padding:.45rem .9rem;margin-left:.4rem;border:1px solid #8888;border-radius:4px;cursor:pointer}
 #msg{min-height:1.5rem}
+footer{margin-top:3rem;padding-top:1rem;border-top:1px solid #8884}
+footer button{margin-left:0}
 </style></head><body>
 <h1>Pair a Moonlight device</h1>
 <p>Start pairing in Moonlight, then enter the PIN it shows here.</p>
 <p id="msg"></p><div id="list">Loading…</div>
+<footer><button id="quit">Stop host</button> ends every stream and stops the host until it is loaded again.</footer>
 <script>
+document.getElementById('quit').onclick = async () => {
+  if (!confirm('Stop the host? Streams end, and it runs again only once it is loaded again.')) return;
+  const r = await fetch('/api/quit', {method:'POST'}); const j = await r.json();
+  msg.textContent = j.message; clearInterval(timer); list.innerHTML = '';
+};
 const list = document.getElementById('list'), msg = document.getElementById('msg');
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 async function load(){
@@ -55,7 +65,7 @@ async function send(url, body){
   const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
   const j = await r.json(); msg.textContent = j.message; document.activeElement.blur(); load();
 }
-load(); setInterval(load, 2000);
+load(); const timer = setInterval(load, 2000);
 </script></body></html>
 )html";
 
@@ -90,7 +100,7 @@ std::optional<nlohmann::json> json_body(const request_t &request) {
 }
 }
 
-void run_pin_page(std::stop_token stop, uint16_t port) {
+void run_pin_page(std::stop_token stop, uint16_t port, std::function<void()> quit) {
     http_server server;
     server.config.port = port;
     // As nvhttp binds: without an address Simple-Web-Server takes the IPv6 wildcard, which on the console's FreeBSD
@@ -128,6 +138,15 @@ void run_pin_page(std::stop_token stop, uint16_t port) {
         if (cancelled) BOOST_LOG(info) << "Pairing page: a pending pairing was denied"sv;
         send_json(response, SimpleWeb::StatusCode::success_ok,
                   {{"ok", cancelled}, {"message", cancelled ? "Denied." : "That request is gone already."}});
+    });
+    server.resource["^/api/quit$"]["POST"] = lan_only([quit](response_t response, request_t) {
+        BOOST_LOG(info) << "Pairing page: the host was asked to stop"sv;
+        send_json(response, SimpleWeb::StatusCode::success_ok, {{"ok", true}, {"message", "The host is stopping."}});
+        // The answer leaves first: stopping the host also stops this server.
+        std::thread([quit] {
+            std::this_thread::sleep_for(200ms);
+            quit();
+        }).detach();
     });
     server.on_error = [](request_t, const SimpleWeb::error_code &) {};
 
