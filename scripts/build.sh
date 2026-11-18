@@ -6,6 +6,20 @@
 # out/debug instead, with prospero_sunshine.debug.elf (line info) and prospero_sunshine.map next to the host.
 set -euo pipefail
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+# PROSPERO_TARGET=ps4 builds the PS4 host (cmake/ps4.cmake) with the PS4 payload SDK into out/ps4; see scripts/deps.sh.
+if [[ "${PROSPERO_TARGET:-ps5}" == ps4 ]]; then
+    export PS4_PAYLOAD_SDK=${PS4_PAYLOAD_SDK:-/opt/ps4-payload-sdk}
+    PROSPERO_COMMIT=${PROSPERO_COMMIT:-$(git -c safe.directory='*' -C "$root" rev-parse --short=8 HEAD 2>/dev/null || true)}
+    export PROSPERO_COMMIT=${PROSPERO_COMMIT:-unknown}
+    build=${BUILD_DIR:-/tmp/prospero-build-ps4}
+    echo "build: PS4, commit $PROSPERO_COMMIT"
+    bash "$root/scripts/deps.sh" >/dev/null
+    "$PS4_PAYLOAD_SDK/bin/orbis-cmake" -S "$root" -B "$build" -G Ninja -DCMAKE_VERBOSE_MAKEFILE=OFF \
+        -DPROSPERO_DEBUG="$([[ "${PROSPERO_DEBUG:-0}" == 1 ]] && echo ON || echo OFF)" >/dev/null
+    cmake --build "$build" "$@"
+    ls -la "$root/out/ps4"/*.elf
+    exit 0
+fi
 sdk=${PS5_PAYLOAD_SDK:-/opt/ps5-payload-sdk}
 if [[ "${PROSPERO_DEBUG:-0}" == 1 ]]; then
     out="$root/out/debug"

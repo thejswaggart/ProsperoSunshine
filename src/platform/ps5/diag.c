@@ -9,7 +9,11 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef __ORBIS__  // the PS4 host shares this file; its SDK has the same klog_printf
+#include <ps4/klog.h>
+#else
 #include <ps5/klog.h>
+#endif
 
 // A capture that keeps failing logs a few lines four times a second (the reopen loop in video_ps5.cpp); with 1 MiB and
 // one older file the lines that show how a problem started are still there when someone opens the report.

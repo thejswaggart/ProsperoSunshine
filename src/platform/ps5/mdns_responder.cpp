@@ -14,7 +14,11 @@
 #include <optional>
 #include <string>
 extern "C" {
+#ifdef __ORBIS__  // the PS4 host shares this file; its SDK has the same klog_printf
+#include <ps4/klog.h>
+#else
 #include <ps5/klog.h>
+#endif
 #include "platform/ps5/diag.h"
 }
 

@@ -30,8 +30,15 @@ if(PROSPERO_DEBUG)
     set(PROSPERO_FLAVOR_SUFFIX "-debug")
 endif()
 
-set(PROSPERO_OUT "${CMAKE_SOURCE_DIR}/out" CACHE PATH "Where ELFs and libraries are placed")
-set(PROSPERO_DEPS "${CMAKE_SOURCE_DIR}/out/deps" CACHE PATH "Prefix of the prebuilt third-party libraries")
+# The PS4 SDK's toolchain file (orbis-cmake) sets PS4; that build has its own output and dependency folders
+# (scripts/deps.sh with PROSPERO_TARGET=ps4) and its own targets in cmake/ps4.cmake.
+if(PS4)
+    set(PROSPERO_OUT "${CMAKE_SOURCE_DIR}/out/ps4" CACHE PATH "Where ELFs and libraries are placed")
+    set(PROSPERO_DEPS "${CMAKE_SOURCE_DIR}/out/deps-ps4" CACHE PATH "Prefix of the prebuilt third-party libraries")
+else()
+    set(PROSPERO_OUT "${CMAKE_SOURCE_DIR}/out" CACHE PATH "Where ELFs and libraries are placed")
+    set(PROSPERO_DEPS "${CMAKE_SOURCE_DIR}/out/deps" CACHE PATH "Prefix of the prebuilt third-party libraries")
+endif()
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${PROSPERO_OUT}")
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${PROSPERO_OUT}")
 set(CMAKE_EXECUTABLE_SUFFIX ".elf")
@@ -48,6 +55,11 @@ foreach(lib ssl crypto opus enet nanors miniupnpc)
     prospero_dep(${lib})
 endforeach()
 set_target_properties(dep::ssl PROPERTIES INTERFACE_LINK_LIBRARIES "dep::crypto;pthread")
+
+if(PS4)
+    include(cmake/ps4.cmake)
+    return()
+endif()
 
 # Platform layer.
 # ResourceArbitrator lookup by NID; never calls into the module.
