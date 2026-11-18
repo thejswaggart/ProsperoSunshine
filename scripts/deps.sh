@@ -13,9 +13,23 @@ if [[ "${1:-}" == --sources ]]; then
     [[ $# -gt 0 ]] || { echo "deps.sh --sources: name the sources to prepare" >&2; exit 2; }
 fi
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-export sdk=${PS5_PAYLOAD_SDK:-/opt/ps5-payload-sdk}
-export prefix="$root/out/deps"
-export work=${DEPS_WORK:-/tmp/prospero-deps}
+# PROSPERO_TARGET picks the console: ps5 (default, prospero-* tools) or ps4 (orbis-* tools from the PS4 payload SDK,
+# which needs libc++ 18 installed into its sysroot). Each target builds into its own prefix.
+case "${PROSPERO_TARGET:-ps5}" in
+    ps5)
+        export sdk=${PS5_PAYLOAD_SDK:-/opt/ps5-payload-sdk} tc=prospero
+        export prefix="$root/out/deps"
+        export work=${DEPS_WORK:-/tmp/prospero-deps}
+        ;;
+    ps4)
+        export sdk=${PS4_PAYLOAD_SDK:-/opt/ps4-payload-sdk} tc=orbis
+        export PS4_PAYLOAD_SDK="$sdk"   # the orbis-ld wrapper finds its linker script through it
+        export prefix="$root/out/deps-ps4"
+        export work=${DEPS_WORK:-/tmp/prospero-deps-ps4}
+        ;;
+    *) echo "deps.sh: PROSPERO_TARGET must be ps5 or ps4" >&2; exit 2 ;;
+esac
+[[ -x "$sdk/bin/$tc-clang" ]] || { echo "deps.sh: no $tc-clang in $sdk/bin" >&2; exit 2; }
 jobs=$(nproc)
 export jobs
 dl="$root/.cache/deps/dl"

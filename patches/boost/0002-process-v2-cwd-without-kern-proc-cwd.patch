@@ -1,0 +1,16 @@
+The PS4 sysroot is FreeBSD 9 based: its <sys/sysctl.h> has no KERN_PROC_CWD (sysctl 42, added in
+FreeBSD 10), so Boost.Process v2's cwd() for FreeBSD does not compile there. Use that branch only where
+the sysctl is declared and fall back to the generic ENOTSUP version otherwise. Sunshine only includes the
+v1 headers, so this merely keeps the (unused) compiled v2 library building. No change for the PS5.
+
+--- a/libs/process/src/ext/cwd.cpp
++++ b/libs/process/src/ext/cwd.cpp
+@@ -130,7 +130,7 @@
+ #endif
+ }
+ 
+-#elif defined(__FreeBSD__)
++#elif defined(__FreeBSD__) && defined(KERN_PROC_CWD)
+ 
+ filesystem::path cwd(boost::process::v2::pid_type pid, error_code & ec)
+ {

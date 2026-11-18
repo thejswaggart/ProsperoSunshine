@@ -35,9 +35,9 @@ static inline int prospero_cpu_supports(const char *feature) {
 #define __builtin_cpu_supports(feature) prospero_cpu_supports(feature)
 PRELUDE
 for f in rs.c deps/obl/oblas_common.c deps/obl/oblas_lite.c; do
-    "$sdk/bin/prospero-clang" -std=gnu11 -O2 -fPIC -include "$b/prelude.h" -I"$n" -I"$n/deps/obl" \
+    "$sdk/bin/$tc-clang" -std=gnu11 -O2 -fPIC -include "$b/prelude.h" -I"$n" -I"$n/deps/obl" \
         -c "$n/$f" -o "$b/$(basename "$f" .c).o"
 done
-"$sdk/bin/prospero-ar" rcs "$prefix/lib/libnanors.a" "$b"/*.o
+"$sdk/bin/$tc-ar" rcs "$prefix/lib/libnanors.a" "$b"/*.o
 cp "$n/rs.h" "$n/deps/obl"/*.h "$prefix/include/nanors/"
 cp "$n/LICENSE" "$prefix/licenses/nanors.txt"

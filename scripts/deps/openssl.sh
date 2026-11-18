@@ -5,7 +5,7 @@
 set -euo pipefail
 b="$work/openssl-build"
 rm -rf "$b" && mkdir -p "$b" && cd "$b"
-CC="$sdk/bin/prospero-clang" AR="$sdk/bin/prospero-ar" RANLIB="$sdk/bin/prospero-ranlib" \
+CC="$sdk/bin/$tc-clang" AR="$sdk/bin/$tc-ar" RANLIB="$sdk/bin/$tc-ranlib" \
     "$src_openssl/Configure" BSD-x86_64 \
     no-shared no-module no-dso no-engine no-async no-tests no-apps no-docs no-ui-console \
     --prefix="$prefix" --libdir=lib --openssldir=/user/homebrew/etc/ssl -O2 -fPIC >/dev/null

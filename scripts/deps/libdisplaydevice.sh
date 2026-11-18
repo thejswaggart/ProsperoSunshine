@@ -8,9 +8,9 @@ s="$src_libdisplaydevice/src/common"
 b="$work/libdisplaydevice-build"
 rm -rf "$b" && mkdir -p "$b"
 for f in "$s"/*.cpp; do
-    "$sdk/bin/prospero-clang++" -std=c++23 -fexperimental-library -O2 -fPIC -I"$s/include" -isystem "$prefix/include" \
+    "$sdk/bin/$tc-clang++" -std=c++23 -fexperimental-library -O2 -fPIC -I"$s/include" -isystem "$prefix/include" \
         -c "$f" -o "$b/$(basename "$f" .cpp).o"
 done
-"$sdk/bin/prospero-ar" rcs "$prefix/lib/libdisplaydevice_common.a" "$b"/*.o
+"$sdk/bin/$tc-ar" rcs "$prefix/lib/libdisplaydevice_common.a" "$b"/*.o
 cp -r "$s/include/display_device" "$prefix/include/"
 cp "$src_libdisplaydevice/LICENSE" "$prefix/licenses/libdisplaydevice.txt"

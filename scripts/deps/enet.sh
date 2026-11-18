@@ -5,7 +5,7 @@
 set -euo pipefail
 b="$work/enet-build"
 rm -rf "$b"
-"$sdk/bin/prospero-cmake" -S "$src_enet" -B "$b" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+"$sdk/bin/$tc-cmake" -S "$src_enet" -B "$b" -G Ninja -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX="$prefix" -DCMAKE_VERBOSE_MAKEFILE=OFF >/dev/null
 cmake --build "$b" >/dev/null
 cmake --install "$b" >/dev/null

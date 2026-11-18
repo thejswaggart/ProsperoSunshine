@@ -7,7 +7,7 @@
 set -euo pipefail
 b="$work/boost-build"
 rm -rf "$b"
-"$sdk/bin/prospero-cmake" -S "$src_boost" -B "$b" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+"$sdk/bin/$tc-cmake" -S "$src_boost" -B "$b" -G Ninja -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX="$prefix" -DCMAKE_VERBOSE_MAKEFILE=OFF \
     -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF -DBOOST_ENABLE_MPI=OFF -DBOOST_ENABLE_PYTHON=OFF \
     "-DBOOST_INCLUDE_LIBRARIES=asio;property_tree;log;filesystem;format;endian;bind;core;process" \
