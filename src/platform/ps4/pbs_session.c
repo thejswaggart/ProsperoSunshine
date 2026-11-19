@@ -6,6 +6,7 @@
 #include "platform/ps4/system/firmware.h"
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 #include <ps4/kernel.h>
@@ -68,14 +69,22 @@ int ps_pbs_close(void) {
 
 int ps_pbs_open(const char *log_path, unsigned bitrate_kbps, uint8_t *headers, size_t capacity) {
     if (began || session_log) return -1;
-    session_log = fopen(log_path, "w");
+    // Sessions append, so a failure isn't lost to the client's retries that follow it; past 1 MB the file starts anew.
+    struct stat st;
+    session_log = fopen(log_path, stat(log_path, &st) == 0 && st.st_size > 1024 * 1024 ? "w" : "a");
     packets = 0;
     const uint32_t firmware_version = kernel_get_fw_version();
     if (bitrate_kbps < 1000) bitrate_kbps = 1000;
     if (bitrate_kbps > 15000) bitrate_kbps = 15000;
-    if (session_log)
-        fprintf(session_log, "ProsperoSunshine PBS session fw=%08x %dp60 bitrate=%u kbps\n", firmware_version, PS_PBS_HEIGHT,
-                bitrate_kbps);
+    if (session_log) {
+        char when[32] = "";
+        const time_t now = time(NULL);
+        struct tm local;
+        if (localtime_r(&now, &local)) strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S", &local);
+        fprintf(session_log, "\n=== %s ProsperoSunshine PBS session pid=%d fw=%08x %dp60 bitrate=%u kbps\n", when, (int)getpid(),
+                firmware_version, PS_PBS_HEIGHT, bitrate_kbps);
+        fflush(session_log);
+    }
     // PBS finds its kernel layout at run time; without one it makes no kernel patches and no capture.
     if (!pbs_ps4_firmware_find(firmware_version)) {
         note("%s (fw=%08x)\n", "PS4 kernel layout unavailable or unsupported", (int)firmware_version);
@@ -89,8 +98,17 @@ int ps_pbs_open(const char *log_path, unsigned bitrate_kbps, uint8_t *headers, s
         return -3;
     }
     began = 1;
-    int rc = pbs_ps4_init();
-    note("%s -> %08x\n", "Init", rc);
+    // Right after a previous host process let the capture go, its SceRemotePlay worker and gates can still be winding
+    // down, and the first Init collides (seen once as Init -> error, which then poisoned that whole host load). PBS's
+    // remote Init rolls its own control/attach back on failure, so a bounded retry is safe and mirrors PBS's own
+    // transient-busy retry on OpenVideoEx. Give it up to ~2 s before giving up for good.
+    int rc = -1;
+    for (unsigned attempt = 1; attempt <= 5; ++attempt) {
+        rc = pbs_ps4_init();
+        note("%s -> %08x\n", attempt == 1 ? "Init" : "Init (retry)", rc);
+        if (rc >= 0) break;
+        if (attempt < 5) usleep(150000);
+    }
     if (rc < 0) {
         ps_pbs_close();
         return -4;

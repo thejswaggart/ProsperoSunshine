@@ -51,7 +51,7 @@ const char *pbs_open_error(int rc) {
     switch (rc) {
     case -1: return "a capture session is open already";
     case -2: return "this firmware's kernel layout wasn't found";
-    case -3: return "PBS refused to begin: an earlier capture wasn't released cleanly (restart the console)";
+    case -3: return "PBS refused to begin: this host's earlier capture wasn't released cleanly (reload the host)";
     case -4: return "Avcap Init failed";
     case -5: return "the video request was rejected";
     case -6: return "OpenVideoEx failed (is Remote Play or another capture running?)";
