@@ -1,0 +1,68 @@
+ProsperoSunshine PS4 port: async-signal-safe emergency detach for the host's crash handler.
+
+When the host crashes while it holds SceRemotePlay under PT_ATTACH (e.g. mid Stop/Close inject),
+it dies as the tracer while the daemon is ptrace-stopped. The stopped system daemon then hangs
+SceShellCore's sceLncServiceKeepAlive and the whole console locks up (observed: a host SIGBUS
+during an audio Stop/Close froze the PS4, needing a power-button reboot).
+
+Track the pid the main inject context holds under PT_ATTACH and expose
+pbs_inject_emergency_detach(), which PT_DETACHes (with a SIGCONT fallback) that pid using only
+syscalls, so the host's fatal-signal handler can resume the daemon before exiting. A no-op when
+nothing is attached.
+--- a/payload/src/common/process/inject.c
++++ b/payload/src/common/process/inject.c
+@@ -45,6 +45,12 @@
+  * changing its authid/caps on each tracing operation is not appropriate. */
+ #define PBS_PTRACE_AUTHID 0x4800000000010003L
+ 
++/* ProsperoSunshine PS4 port: the target pid currently held under PT_ATTACH by the main inject context, so the host's
++ * fatal-signal handler can resume it on a crash (pbs_inject_emergency_detach). Without this, a host crash while the
++ * tracee is ptrace-stopped leaves a system daemon (SceRemotePlay) frozen, which hangs SceShellCore and locks the whole
++ * console. pid_t writes are atomic; volatile so the handler sees the current value. */
++static volatile pid_t pbs_emergency_pid;
++
+ static int pb_ptrace(int request, pid_t pid, caddr_t addr, int data) {
+ #ifndef PBS_PS4
+   pid_t me = getpid();
+@@ -279,6 +285,7 @@
+     usleep(10 * 1000);
+   }
+   ctx->attached = 1;
++  pbs_emergency_pid = ctx->pid;  /* resume this tracee if the host crashes while it is stopped */
+   if (pb_wait_stop(ctx->pid, 2000)) {
+     pbs_inject_end(ctx);
+     return -1;
+@@ -684,7 +691,19 @@
+      * SIGCONT if detach itself failed. */
+     kill(ctx->pid, SIGCONT);
+   }
++  if (pbs_emergency_pid == ctx->pid) pbs_emergency_pid = 0;  /* cleanly detached; nothing for the crash handler to resume */
+   ctx->attached = 0;
+   ctx->running = 0;
+   ctx->lwp = 0;
+ }
++
++/* ProsperoSunshine PS4 port: async-signal-safe emergency detach for the host's fatal-signal handler. If the host crashes
++ * while it holds SceRemotePlay under PT_ATTACH, resume the tracee (PT_DETACH, with a SIGCONT fallback) so a crash never
++ * leaves a system daemon ptrace-stopped — which otherwise hangs SceShellCore and locks the console. Uses only syscalls, so
++ * it is safe from a signal handler. A no-op when nothing is attached (at worst a harmless SIGCONT to a running process). */
++void pbs_inject_emergency_detach(void) {
++  pid_t pid = pbs_emergency_pid;
++  if (pid <= 0) return;
++  pb_ptrace(PT_DETACH, pid, 0, 0);
++  kill(pid, SIGCONT);
++}
+--- a/payload/src/common/process/inject.h
++++ b/payload/src/common/process/inject.h
+@@ -58,6 +58,11 @@
+ /* Resolve a module export by symbol NID in the target process. */
+ intptr_t pbs_resolve_in(pid_t pid, const char *module, const char *symbol);
+ 
++/* ProsperoSunshine PS4 port: resume the tracee the main inject context currently holds under PT_ATTACH, if any. Async-
++ * signal-safe (syscalls only); call it from the host's fatal-signal handler so a crash never leaves SceRemotePlay
++ * ptrace-stopped and freezes the console. A no-op when nothing is attached. */
++void pbs_inject_emergency_detach(void);
++
+ /* Attach and prepare scratch memory; return zero on success. */
+ int pbs_inject_begin(const char *proc_name, pbs_inject_t *ctx);
+ /* Same, but prefer an already-validated target page if it is still safely

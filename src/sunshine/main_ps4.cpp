@@ -18,11 +18,16 @@
 #include "src/rtsp.h"
 #include "src/stream.h"
 #include "src/video.h"
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <thread>
+#include <unistd.h>
+#include <sys/ucontext.h>
 #include <boost/log/core.hpp>
 #include <boost/log/expressions.hpp>
 #include <boost/log/sinks.hpp>
@@ -32,11 +37,59 @@ extern "C" {
 #include <ps4/klog.h>
 #include "platform/ps5/diag.h"
 int sceKernelSetProcessName(const char *name);
+// patch 0003: resume SceRemotePlay if the host crashes while it is held under ptrace, so a crash can't freeze the console.
+void pbs_inject_emergency_detach(void);
 }
 
 using namespace std::literals;
 
 namespace {
+// Fatal-signal handler. The host drives SceRemotePlay through ptrace; if it dies while the daemon is stopped mid-call, the
+// daemon stays frozen and SceShellCore (which depends on it) hangs, locking the whole console. So on any fatal signal we
+// first resume the daemon (pbs_inject_emergency_detach, async-signal-safe), write one crash line to host_diag.log, then
+// _exit so GoldHEN can recover. Only async-signal-safe calls are used here.
+int g_crash_fd = -1;
+void crash_puts(const char *s) {
+    if (g_crash_fd >= 0) {
+        const ssize_t r = write(g_crash_fd, s, std::strlen(s));
+        (void)r;
+    }
+}
+void crash_hex(unsigned long v) {
+    char b[16];
+    static const char h[] = "0123456789abcdef";
+    for (int i = 0; i < 16; ++i) b[i] = h[(v >> ((15 - i) * 4)) & 15];
+    if (g_crash_fd >= 0) {
+        const ssize_t r = write(g_crash_fd, b, sizeof b);
+        (void)r;
+    }
+}
+void crash_handler(int sig, siginfo_t *info, void *context) {
+    pbs_inject_emergency_detach();  // CRITICAL first: never leave SceRemotePlay ptrace-stopped
+    static const char h[] = "0123456789abcdef";
+    char sg[2] = {h[(sig >> 4) & 15], h[sig & 15]};
+    crash_puts("ProsperoSunshine host crash: sig=");
+    if (g_crash_fd >= 0) {
+        const ssize_t r = write(g_crash_fd, sg, 2);
+        (void)r;
+    }
+    crash_puts(" rip=");
+    crash_hex(context ? static_cast<unsigned long>(static_cast<ucontext_t *>(context)->uc_mcontext.mc_rip) : 0);
+    crash_puts(" addr=");
+    crash_hex(info ? reinterpret_cast<unsigned long>(info->si_addr) : 0);
+    crash_puts("\n");
+    _exit(128 + sig);
+}
+void install_crash_handler() {
+    g_crash_fd = open((platf::appdata() / "host_diag.log").string().c_str(), O_WRONLY | O_APPEND | O_CREAT, 0666);
+    struct sigaction sa;
+    std::memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = crash_handler;
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    for (const int sig : {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGSYS, SIGABRT}) sigaction(sig, &sa, nullptr);
+}
+
 // Sunshine logs to stdout and a file; on the console the kernel log is what developers watch.
 struct klog_backend : boost::log::sinks::basic_formatted_sink_backend<char, boost::log::sinks::synchronized_feeding> {
     void consume(const boost::log::record_view &record, const std::string &) {
@@ -67,6 +120,8 @@ int main(int argc, char *argv[]) {
     std::snprintf(header, sizeof header, "ProsperoSunshine: PS4 host version=%s commit=%s firmware=%#x", PROJECT_VERSION,
                   PROJECT_VERSION_COMMIT, kernel_get_fw_version());
     ps_diag_open((platf::appdata() / "host_diag.log").c_str(), header);
+    // Catch fatal signals: resume SceRemotePlay (so a crash can't freeze the console) and record the fault, then exit.
+    install_crash_handler();
     // config::parse copies a template apps.json from Sunshine's assets when none exists; there are no assets on the
     // console, and the app list is fixed in process_ps4.cpp anyway.
     if (const auto apps = platf::appdata() / "apps.json"; !std::filesystem::exists(apps, ec))
