@@ -62,13 +62,13 @@ set(SUNSHINE_KEPT
     logging.cpp cbs.cpp file_handler.cpp globals.cpp stat_trackers.cpp)
 list(TRANSFORM SUNSHINE_KEPT PREPEND "${SUNSHINE_SRC}/src/")
 
-# Cover art for the single app, embedded so the host can install it without a separate upload. The PS5 picture for now.
-set(COVER_PNG "${CMAKE_SOURCE_DIR}/assets/ps5_screen.png")
+# Cover art for the single app, embedded so the host can install it without a separate upload.
+set(COVER_PNG "${CMAKE_SOURCE_DIR}/assets/ps4_screen.png")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${COVER_PNG}")
 file(READ "${COVER_PNG}" COVER_HEX HEX)
 string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," COVER_BYTES "${COVER_HEX}")
 file(CONFIGURE OUTPUT "${CMAKE_BINARY_DIR}/generated/cover_png.cpp" CONTENT
-    "// Generated from assets/ps5_screen.png by cmake/ps4.cmake\n#include <cstddef>\nextern const unsigned char prospero_cover_png[] = {@COVER_BYTES@};\nextern const std::size_t prospero_cover_png_size = sizeof prospero_cover_png;\n")
+    "// Generated from assets/ps4_screen.png by cmake/ps4.cmake\n#include <cstddef>\nextern const unsigned char prospero_cover_png[] = {@COVER_BYTES@};\nextern const std::size_t prospero_cover_png_size = sizeof prospero_cover_png;\n")
 
 add_executable(prospero_sunshine_ps4 "${CMAKE_BINARY_DIR}/generated/cover_png.cpp"
     ${SUNSHINE_KEPT}
