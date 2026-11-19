@@ -49,33 +49,46 @@ static void note(const char *format, const char *what, int value) {
     fflush(session_log);
 }
 
+// A teardown/reconnect breadcrumb, flushed to the session log before the step it names runs, so if that step brings the
+// host down the log's last line points at it. Used to localise an intermittent crash seen during rapid reconnect.
+static void mark(const char *what) {
+    if (!session_log) return;
+    fprintf(session_log, ">> %s\n", what);
+    fflush(session_log);
+}
+
 // Releases whatever an open set up (Stop, Close, Term, capture end), leaving the session log open so a retry can keep
 // writing to it. Returns 0, or negative if a release step failed.
 static int release_session(void) {
     int failed = 0;
     ps_pbs_audio_close();  // release the audio channel before the video session
     if (started) {
+        mark("release: Stop");
         const int rc = pbs_ps4_stop(handle);
         note("%s -> %08x\n", "Stop", rc);
         if (rc < 0) failed = -1;
         started = 0;
     }
     if (handle) {
+        mark("release: Close");
         const int rc = pbs_ps4_close(handle);
         note("%s -> %08x\n", "Close", rc);
         if (rc < 0) failed = -1;
         handle = NULL;
     }
     if (initialized) {
+        mark("release: Term");
         const int rc = pbs_ps4_term();
         note("%s -> %08x\n", "Term", rc);
         if (rc < 0) failed = -1;
         initialized = 0;
     }
     if (began) {
+        mark("release: capture_end");
         pbs_ps4_capture_end();
         began = 0;
     }
+    mark("release: done");
     return failed;
 }
 
@@ -83,17 +96,25 @@ static int release_session(void) {
 // teardown/respawn, unless the capture was lost mid-stream. Only the per-stream audio channel and the session log are
 // closed here; ps_pbs_shutdown does the real daemon release on host exit.
 int ps_pbs_close(void) {
-    ps_pbs_audio_close();  // audio is opened per stream; the video daemon stays warm
+    mark("close: begin");
     if (warm && started && handle && !capture_lost) {
+        // Keep BOTH the video daemon and the audio channel warm: inject nothing into SceRemotePlay during a reconnect
+        // teardown. The injected audio Stop/Close here was faulting the host (SIGBUS / general protection fault in the
+        // ptrace call path) when a reconnect tore down while the client still held its session open (the Moonlight
+        // Resume/Quit menu). Holding the audio channel open across reconnects removes that inject from the hot teardown
+        // path entirely; the channel is only Stopped/Closed on the cold/lost path and on host shutdown.
+        mark("close: holding daemon + audio warm");
         if (session_log) {
-            fprintf(session_log, "stream end: packets=%llu, capture held warm for reconnect\n",
+            fprintf(session_log, "stream end: packets=%llu, capture + audio held warm for reconnect\n",
                     (unsigned long long)packets);
             fclose(session_log);
             session_log = NULL;
         }
         return 0;
     }
-    // Not warm, or the capture died under us: release the daemon fully so the next open cold-opens a fresh one.
+    // Not warm, or the capture died under us: release the daemon fully (audio + video) so the next open cold-opens fresh.
+    // This is the only close path that injects Stop/Close, and it does not run on an ordinary reconnect.
+    mark("close: releasing daemon");
     const int failed = release_session();
     warm = 0;
     capture_lost = 0;
@@ -215,7 +236,9 @@ int ps_pbs_open(const char *log_path, unsigned bitrate_kbps, uint8_t *headers, s
     // longer answers, the daemon died while warm, so fall through to a cold open. Otherwise hand back the cached SPS/PPS and
     // ask for an IDR so the (re)connecting client has an entry point.
     if (warm && started && handle && !capture_lost && warm_headers_len > 0) {
+        mark("open: warm reuse, keyframe probe");
         if (warm_headers_len <= capacity && ps_pbs_keyframe() >= 0) {
+            mark("open: warm reuse ok");
             memcpy(headers, warm_headers, warm_headers_len);
             if (session_log) {
                 fprintf(session_log, "reusing warm capture (daemon held); %zu header bytes, keyframe requested\n",
@@ -314,7 +337,13 @@ int ps_pbs_keyframe(void) {
 }
 
 int ps_pbs_audio_open(void) {
-    if (!started || audio_handle) return -1;
+    if (!started) return -1;
+    if (audio_handle) {
+        // Audio is held warm across reconnects (see ps_pbs_close): the channel from the previous stream is still open on
+        // the held daemon, so reuse it without re-injecting OpenAudioEx/Start. The caller's audio bridge is still per-stream.
+        note("%s\n", "audio reuse (held warm on daemon)", 0);
+        return 0;
+    }
     // 16-byte OpenAudioEx config, taken verbatim from a live Remote Play session (ps4debug on SceRemotePlay pid 47: found
     // remoteplay's call site OpenAudioEx(&handle, &obj+0x204) and read the exact bytes it passes — three live buffers all
     // agreed). RemotePlay uses OpenAudioEx, NOT the plain OpenAudio, and this is the config the AV service accepts:
@@ -341,6 +370,8 @@ int ps_pbs_audio_read(void *destination, size_t capacity) {
 
 void ps_pbs_audio_close(void) {
     if (!audio_handle) return;
+    mark("audio_close: Stop/Close");
     pbs_ps4_audio_close(audio_handle);
+    mark("audio_close: done");
     audio_handle = NULL;
 }
