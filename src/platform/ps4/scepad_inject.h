@@ -14,6 +14,11 @@ extern "C" {
 /* scePadInit once (on PS4 it does not hang, unlike the PS5 payload note in pad.c). 0 or an "already initialized" code. */
 int ps_scepad_init(void);
 
+/* Deletes libScePad's virtual-device entry for `handle` (the /dev/hid ADD handle / DeviceId). ps_pad_close removes the HID
+ * side, but libScePad keeps its own entry (fed by InsertData), which the console shows as a leftover controller; call this
+ * alongside ps_pad_close to clear it. Returns scePadVirtualDeviceDeleteDevice's result. */
+int ps_scepad_remove(int32_t handle);
+
 /* Injects one frame into the virtual pad addressed by `handle` (the /dev/hid ADD handle, which equals the DeviceId
  * libScePad uses). buttons are PS_PAD_* bits; sticks and triggers are 0..255, 128 centre. The timestamp and counter are
  * stamped here because the PS4 de-dups an unchanged sample. Returns scePadVirtualDeviceInsertData's result. */

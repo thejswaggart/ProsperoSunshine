@@ -6,6 +6,7 @@
 
 extern int32_t scePadInit(void);
 extern int32_t scePadVirtualDeviceInsertData(int32_t handle, const void *pad_data);
+extern int32_t scePadVirtualDeviceDeleteDevice(int32_t handle);
 
 /* The PS5 ScePadData layout, used verbatim on PS4 (ps5-gamepad-bridge gc_types.h). Its leading fields -- buttons, both
  * sticks, the analog triggers -- are what libScePad reads; the rest is zeroed. */
@@ -45,6 +46,13 @@ int ps_scepad_init(void) {
     const int rc = scePadInit();
     init_done = 1;
     return rc;
+}
+
+int ps_scepad_remove(int32_t handle) {
+    // The /dev/hid DELETE (ps_pad_close) removes the HID device, but libScePad keeps its own virtual-device entry for the
+    // handle it has been fed through scePadVirtualDeviceInsertData; the console then still lists a leftover controller.
+    // scePadVirtualDeviceDeleteDevice clears that entry.
+    return scePadVirtualDeviceDeleteDevice(handle);
 }
 
 int ps_scepad_inject(int32_t handle, uint32_t buttons, uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry, uint8_t l2,

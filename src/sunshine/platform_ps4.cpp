@@ -294,16 +294,29 @@ public:
 std::unique_ptr<audio_control_t> audio_control() { return std::make_unique<silent_audio_control>(); }
 
 // Input: one native virtual DualShock 4 on /dev/hid (platform/ps5/pad.c, shared with the PS5 host), fed by Moonlight's
-// gamepad state. Keyboard, mouse, touch and motion are not forwarded yet. One controller for now: a second announced
-// gamepad is refused.
+// gamepad state. Keyboard, mouse, touch and motion are not forwarded yet. One controller at a time: a newly announced
+// controller replaces the open one (newest wins), so a reconnect — or a swap after a controller was powered off without
+// Moonlight sending a removal — takes over the slot instead of being refused. Every arrival/rebind/free is logged with its
+// Moonlight indices so we can see exactly what the client signals on a controller power-off.
 struct input_raw_t {
     std::mutex mutex;
     ps_pad *pad = nullptr;
     int pad_nr = -1;  // the Moonlight global index that owns the pad
 };
 
+// Fully remove the virtual controller: libScePad's virtual-device entry first (scePadVirtualDeviceDeleteDevice), then the
+// /dev/hid device (ps_pad_close, which also sends a neutral state and closes the fd). Doing only the /dev/hid delete left
+// libScePad's entry behind, so the console still listed a leftover controller after the stream pad went away.
+static void close_virtual_pad(ps_pad *pad) {
+    if (!pad) return;
+    const int del_rc = ps_scepad_remove(static_cast<int32_t>(ps_pad_device_id(pad)));
+    const int rc = ps_pad_close(pad);
+    BOOST_LOG(info) << "PS4 input: virtual controller removed (scePadVirtualDeviceDeleteDevice rc="sv << del_rc
+                    << ", /dev/hid rc="sv << rc << ')';
+}
+
 void freeInput(input_raw_t *input) {
-    if (input->pad) ps_pad_close(input->pad);
+    if (input->pad) close_virtual_pad(input->pad);
     delete input;
 }
 input_t input() { return input_t{new input_raw_t}; }
@@ -380,9 +393,23 @@ void pen_update(client_input_t *, const touch_port_t &, const pen_input_t &) {}
 int alloc_gamepad(input_t &input, const gamepad_id_t &id, const gamepad_arrival_t &, feedback_queue_t) {
     auto raw = static_cast<input_raw_t *>(input.get());
     std::lock_guard lock(raw->mutex);
+    BOOST_LOG(info) << "PS4 input: gamepad arrival, global="sv << id.globalIndex << " clientIdx="sv
+                    << static_cast<int>(id.clientRelativeIndex)
+                    << (raw->pad ? " (a pad is already open for nr="s + std::to_string(raw->pad_nr) + ")"s : ""s);
     if (raw->pad) {
-        BOOST_LOG(info) << "PS4 input: a second controller was announced; only one is supported for now, ignoring"sv;
-        return -1;
+        if (raw->pad_nr == id.globalIndex) {
+            // Same slot re-announced: keep the open pad rather than refuse, so a reconnect doesn't strand the controller.
+            BOOST_LOG(info) << "PS4 input: same global index re-announced; keeping the existing virtual controller"sv;
+            return 0;
+        }
+        // A different controller arrived while one is open. We support one at a time, so the newest wins: replace the old
+        // pad. This covers a controller powered off without a Moonlight removal, then a different one turned on — the open
+        // slot is stale and would otherwise block the new controller.
+        BOOST_LOG(info) << "PS4 input: a different controller arrived (new global="sv << id.globalIndex << ", had nr="sv
+                        << raw->pad_nr << "); replacing the virtual controller"sv;
+        close_virtual_pad(raw->pad);
+        raw->pad = nullptr;
+        raw->pad_nr = -1;
     }
     // A signed-in user if there is one, else let the console ask "Who's using this controller?".
     uint32_t user = ps_pad_default_user();
@@ -396,21 +423,36 @@ int alloc_gamepad(input_t &input, const gamepad_id_t &id, const gamepad_arrival_
     const int init_rc = ps_scepad_init();  // libScePad for the inject path; on PS4 this does not hang
     raw->pad = pad;
     raw->pad_nr = id.globalIndex;
-    BOOST_LOG(info) << "PS4 input: virtual DualShock 4 added, device id "sv << ps_pad_device_id(pad) << " (scePadInit rc="sv
-                    << init_rc << ')' << (user == PS_PAD_NO_USER ? "; pick a profile on the console"sv : ""sv);
+    BOOST_LOG(info) << "PS4 input: virtual DualShock 4 added, device id "sv << ps_pad_device_id(pad) << " for global index "sv
+                    << id.globalIndex << " (scePadInit rc="sv << init_rc << ')'
+                    << (user == PS_PAD_NO_USER ? "; pick a profile on the console"sv : ""sv);
     return 0;
 }
 
-int rebind_gamepad(input_t &, const gamepad_id_t &, feedback_queue_t) { return -1; }
+int rebind_gamepad(input_t &input, const gamepad_id_t &id, feedback_queue_t) {
+    auto raw = static_cast<input_raw_t *>(input.get());
+    std::lock_guard lock(raw->mutex);
+    BOOST_LOG(info) << "PS4 input: gamepad rebind, global="sv << id.globalIndex << " clientIdx="sv
+                    << static_cast<int>(id.clientRelativeIndex)
+                    << (raw->pad ? " (open pad nr="s + std::to_string(raw->pad_nr) + ")"s : " (no pad open)"s);
+    // Single pad: if this is our controller's slot, keep it; otherwise there is nothing to rebind.
+    return (raw->pad && raw->pad_nr == id.globalIndex) ? 0 : -1;
+}
 
 void free_gamepad(input_t &input, int nr) {
     auto raw = static_cast<input_raw_t *>(input.get());
     std::lock_guard lock(raw->mutex);
+    BOOST_LOG(info) << "PS4 input: gamepad free requested for nr="sv << nr
+                    << (raw->pad ? ", open pad nr="s + std::to_string(raw->pad_nr) : ", no pad open"s);
     if (raw->pad && nr == raw->pad_nr) {
-        ps_pad_close(raw->pad);
+        close_virtual_pad(raw->pad);
         raw->pad = nullptr;
         raw->pad_nr = -1;
-        BOOST_LOG(info) << "PS4 input: virtual controller removed"sv;
+    } else if (raw->pad) {
+        // Moonlight asked to free a slot that is not the one we hold. Log it (diagnostic): in the single-slot model this
+        // means the removal index didn't match our pad, which would leave the controller stranded.
+        BOOST_LOG(info) << "PS4 input: free nr="sv << nr << " does not match the open pad (nr="sv << raw->pad_nr
+                        << "); leaving it open"sv;
     }
 }
 
