@@ -3,6 +3,7 @@
 // first milestone streams video only; Moonlight's audio stream still gets correctly paced silence so it stays up, and
 // controller, keyboard and mouse input is accepted and dropped.
 #include "net/send_retry.hpp"
+#include "platform/ps4/audio_bridge.hpp"  // float ring filled by the capture thread, drained by the game-audio mic
 #include "platform/ps5/pad.h"  // native /dev/hid virtual controller, shared with the PS5 host
 #include "platform/ps4/scepad_inject.h"  // per-frame input via libScePad (the /dev/hid INSERT ioctl is rejected on PS4)
 #include "src/config.h"
@@ -244,12 +245,41 @@ private:
     std::chrono::steady_clock::time_point next_;
 };
 
+// Game audio from PBS. The capture thread fills the bridge with interleaved float32 stereo 48 kHz samples; this mic self-
+// paces one Opus frame at a time (as silent_mic does) and drains that many samples, padding with silence on underflow so
+// the audio stream never stalls or spins. Only used when the stream matches Avcap's native layout (2 ch, 48 kHz); any other
+// layout falls back to silence rather than mangle the channel mapping.
+class pbs_mic final : public mic_t {
+public:
+    pbs_mic(int channels, std::uint32_t rate, std::uint32_t frame_size)
+        : samples_(static_cast<size_t>(channels) * frame_size),
+          period_(std::chrono::nanoseconds(1'000'000'000LL * frame_size / rate)),
+          next_(std::chrono::steady_clock::now()) {}
+    capture_e sample(std::vector<float> &frame_buffer) override {
+        next_ += period_;
+        std::this_thread::sleep_until(next_);
+        frame_buffer.resize(samples_);
+        prospero::audio_bridge::pull(frame_buffer.data(), samples_);
+        return capture_e::ok;
+    }
+
+private:
+    size_t samples_;
+    std::chrono::nanoseconds period_;
+    std::chrono::steady_clock::time_point next_;
+};
+
 class silent_audio_control final : public audio_control_t {
 public:
     int set_sink(const std::string &) override { return 0; }
     std::unique_ptr<mic_t> microphone(const std::uint8_t *, int channels, std::uint32_t sample_rate, std::uint32_t frame_size,
                                       bool, bool) override {
-        BOOST_LOG(info) << "PS4 audio: sending silence, "sv << channels << " channels at "sv << sample_rate << " Hz"sv;
+        if (channels == 2 && sample_rate == 48000) {
+            BOOST_LOG(info) << "PS4 audio: streaming game audio, 2 channels at 48000 Hz"sv;
+            return std::make_unique<pbs_mic>(channels, sample_rate, frame_size);
+        }
+        BOOST_LOG(info) << "PS4 audio: sending silence (no native capture for "sv << channels << " channels at "sv
+                        << sample_rate << " Hz), "sv << channels << " channels at "sv << sample_rate << " Hz"sv;
         return std::make_unique<silent_mic>(channels, sample_rate, frame_size);
     }
     bool is_sink_available(const std::string &) override { return true; }

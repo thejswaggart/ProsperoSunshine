@@ -6,7 +6,8 @@
 #include "capture/capture_session.hpp"
 #include "capture/replay_backend.hpp"
 #include "platform/ps4/pbs_backend.hpp"
-#include "platform/ps4/pbs_session.h"  // audio probe (temporary)
+#include "platform/ps4/audio_bridge.hpp"
+#include "platform/ps4/pbs_session.h"
 #include "src/config.h"
 #include "src/file_handler.h"
 #include "src/globals.h"
@@ -160,25 +161,27 @@ void capture(safe::mail_t mail, config_t config, stream::session_t *channel_data
     else
         BOOST_LOG(info) << "PS4 capture: screen capture open, 1280x720@60, "sv << kbps << " kbit/s"sv;
 
-    // Audio probe (temporary): on the PBS path, open the game-audio channel and read a few frames in this same thread, so
-    // OpenAudio's config and ReadAudio are proven before the mic pipeline is built. Logged to pbs_capture.log.
-    bool audio_probe = false;
-    int audio_logged = 0;
+    // Game audio: open the PBS audio channel and feed each ReadAudio frame into the audio bridge, all on this capture
+    // thread — audio and video reads share one injection context and must not run concurrently (pbs_session.h). The mic
+    // (platform_ps4.cpp) drains the bridge. Avcap delivers interleaved float32 stereo at 48 kHz in [-1,1], exactly what
+    // Sunshine's Opus float encoder consumes, so the samples pass through unconverted.
+    bool audio_open = false;
     std::vector<uint8_t> audio_buf;
-    if (!settings.replay) {
-        audio_probe = ps_pbs_audio_open() == 0;
-        if (audio_probe) audio_buf.resize(64 * 1024);
+    if (!settings.replay && ps_pbs_audio_open() == 0) {
+        audio_open = true;
+        audio_buf.resize(64 * 1024);
+        prospero::audio_bridge::open(48000u * 2u / 4u);  // ~250 ms of 48 kHz stereo float, to bound latency
+        BOOST_LOG(info) << "PS4 audio: capturing game audio (float32 stereo 48 kHz)"sv;
     }
 
     int64_t next_index = 0;
     prospero::EncodedFrame frame;
     while (!shutdown_event->peek()) {
-        if (audio_probe) {
+        if (audio_open) {
             const int a = ps_pbs_audio_read(audio_buf.data(), audio_buf.size());
-            if (a != 0 && audio_logged < 8) {
-                ++audio_logged;
-                BOOST_LOG(info) << "PS4 audio probe: ReadAudio #"sv << audio_logged << " rc/len="sv << a;
-            }
+            if (a > 0)
+                prospero::audio_bridge::push(reinterpret_cast<const float *>(audio_buf.data()),
+                                             static_cast<size_t>(a) / sizeof(float));
         }
         if (idr_events->peek()) {
             idr_events->pop();
@@ -196,6 +199,7 @@ void capture(safe::mail_t mail, config_t config, stream::session_t *channel_data
         packets->raise(std::move(packet));
         frame.bytes = {};
     }
+    if (audio_open) prospero::audio_bridge::close();
     session.stop();
 }
 }
