@@ -3,6 +3,8 @@
 // first milestone streams video only; Moonlight's audio stream still gets correctly paced silence so it stays up, and
 // controller, keyboard and mouse input is accepted and dropped.
 #include "net/send_retry.hpp"
+#include "platform/ps5/pad.h"  // native /dev/hid virtual controller, shared with the PS5 host
+#include "platform/ps4/scepad_inject.h"  // per-frame input via libScePad (the /dev/hid INSERT ioctl is rejected on PS4)
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
@@ -261,10 +263,19 @@ public:
 
 std::unique_ptr<audio_control_t> audio_control() { return std::make_unique<silent_audio_control>(); }
 
-// Input: none yet. Sunshine still decodes what the client sends; it ends here.
-struct input_raw_t {};
+// Input: one native virtual DualShock 4 on /dev/hid (platform/ps5/pad.c, shared with the PS5 host), fed by Moonlight's
+// gamepad state. Keyboard, mouse, touch and motion are not forwarded yet. One controller for now: a second announced
+// gamepad is refused.
+struct input_raw_t {
+    std::mutex mutex;
+    ps_pad *pad = nullptr;
+    int pad_nr = -1;  // the Moonlight global index that owns the pad
+};
 
-void freeInput(input_raw_t *input) { delete input; }
+void freeInput(input_raw_t *input) {
+    if (input->pad) ps_pad_close(input->pad);
+    delete input;
+}
 input_t input() { return input_t{new input_raw_t}; }
 
 void move_mouse(input_t &, int, int) {}
@@ -275,24 +286,111 @@ void scroll(input_t &, int) {}
 void hscroll(input_t &, int) {}
 void keyboard_update(input_t &, uint16_t, bool, uint8_t, bool) {}
 void unicode(input_t &, const char *, int) {}
-void gamepad_update(input_t &, int, const gamepad_state_t &) {}
+
+namespace {
+// A Moonlight stick axis (int16, +up/+right) to a DualShock axis (0..255, 128 centre).
+uint8_t to_axis(int value) {
+    value = 128 + (value >> 8);
+    return value < 0 ? 0 : value > 255 ? 255 : (uint8_t)value;
+}
+
+uint32_t to_ds4_buttons(uint32_t m) {
+    uint32_t b = 0;
+    if (m & DPAD_UP) b |= PS_PAD_UP;
+    if (m & DPAD_DOWN) b |= PS_PAD_DOWN;
+    if (m & DPAD_LEFT) b |= PS_PAD_LEFT;
+    if (m & DPAD_RIGHT) b |= PS_PAD_RIGHT;
+    if (m & A) b |= PS_PAD_CROSS;
+    if (m & B) b |= PS_PAD_CIRCLE;
+    if (m & X) b |= PS_PAD_SQUARE;
+    if (m & Y) b |= PS_PAD_TRIANGLE;
+    if (m & LEFT_BUTTON) b |= PS_PAD_L1;
+    if (m & RIGHT_BUTTON) b |= PS_PAD_R1;
+    if (m & LEFT_STICK) b |= PS_PAD_L3;
+    if (m & RIGHT_STICK) b |= PS_PAD_R3;
+    if (m & START) b |= PS_PAD_OPTIONS;
+    if (m & BACK) b |= PS_PAD_CREATE;  // DS4 Share
+    if (m & HOME) b |= PS_PAD_PS;
+    if (m & TOUCHPAD_BUTTON) b |= PS_PAD_TOUCHPAD;
+    return b;
+}
+}  // namespace
+
+void gamepad_update(input_t &input, int nr, const gamepad_state_t &state) {
+    auto raw = static_cast<input_raw_t *>(input.get());
+    std::lock_guard lock(raw->mutex);
+    if (!raw->pad || nr != raw->pad_nr) return;
+    ps_pad_state s{};
+    s.buttons = to_ds4_buttons(state.buttonFlags);
+    if (state.lt) s.buttons |= PS_PAD_L2;  // the digital L2/R2 bits, set once the analog trigger moves
+    if (state.rt) s.buttons |= PS_PAD_R2;
+    s.lx = to_axis(state.lsX);
+    s.ly = to_axis(-static_cast<int>(state.lsY));  // DS4 Y grows downward
+    s.rx = to_axis(state.rsX);
+    s.ry = to_axis(-static_cast<int>(state.rsY));
+    s.l2 = state.lt;
+    s.r2 = state.rt;
+    // The /dev/hid INSERT ioctl is rejected on PS4 (EIO); inject through libScePad, which works there, addressing the pad
+    // by the /dev/hid ADD handle.
+    const int rc = ps_scepad_inject(static_cast<int32_t>(ps_pad_device_id(raw->pad)), s.buttons, s.lx, s.ly, s.rx, s.ry,
+                                    s.l2, s.r2);
+    static bool logged = false;
+    if (!logged) {
+        logged = true;
+        BOOST_LOG(info) << "PS4 input: first controller frame injected via libScePad, rc="sv << rc;
+    }
+}
+
 void gamepad_touch(input_t &, const gamepad_touch_t &) {}
 void gamepad_motion(input_t &, const gamepad_motion_t &) {}
 void gamepad_battery(input_t &, const gamepad_battery_t &) {}
 void touch_update(client_input_t *, const touch_port_t &, const touch_input_t &) {}
 void pen_update(client_input_t *, const touch_port_t &, const pen_input_t &) {}
 
-// No virtual pads: a gamepad the client announces is refused, and Sunshine drops its input.
-int alloc_gamepad(input_t &, const gamepad_id_t &, const gamepad_arrival_t &, feedback_queue_t) { return -1; }
+int alloc_gamepad(input_t &input, const gamepad_id_t &id, const gamepad_arrival_t &, feedback_queue_t) {
+    auto raw = static_cast<input_raw_t *>(input.get());
+    std::lock_guard lock(raw->mutex);
+    if (raw->pad) {
+        BOOST_LOG(info) << "PS4 input: a second controller was announced; only one is supported for now, ignoring"sv;
+        return -1;
+    }
+    // A signed-in user if there is one, else let the console ask "Who's using this controller?".
+    uint32_t user = ps_pad_default_user();
+    if (!user) user = PS_PAD_NO_USER;
+    ps_pad *pad = nullptr;
+    const int rc = ps_pad_open(user, &pad);
+    if (rc < 0 || !pad) {
+        BOOST_LOG(warning) << "PS4 input: could not add the virtual controller (/dev/hid): "sv << rc;
+        return -1;
+    }
+    const int init_rc = ps_scepad_init();  // libScePad for the inject path; on PS4 this does not hang
+    raw->pad = pad;
+    raw->pad_nr = id.globalIndex;
+    BOOST_LOG(info) << "PS4 input: virtual DualShock 4 added, device id "sv << ps_pad_device_id(pad) << " (scePadInit rc="sv
+                    << init_rc << ')' << (user == PS_PAD_NO_USER ? "; pick a profile on the console"sv : ""sv);
+    return 0;
+}
+
 int rebind_gamepad(input_t &, const gamepad_id_t &, feedback_queue_t) { return -1; }
-void free_gamepad(input_t &, int) {}
+
+void free_gamepad(input_t &input, int nr) {
+    auto raw = static_cast<input_raw_t *>(input.get());
+    std::lock_guard lock(raw->mutex);
+    if (raw->pad && nr == raw->pad_nr) {
+        ps_pad_close(raw->pad);
+        raw->pad = nullptr;
+        raw->pad_nr = -1;
+        BOOST_LOG(info) << "PS4 input: virtual controller removed"sv;
+    }
+}
+
 void set_gamepad_owner(const feedback_queue_t &, std::string_view) {}
 void set_input_owner(const feedback_queue_t *) {}
 void trace_call(const std::string &) {}
 
 std::vector<supported_gamepad_t> &supported_gamepads(input_t *) {
-    static std::vector<supported_gamepad_t> none;
-    return none;
+    static std::vector<supported_gamepad_t> pads{{"ds4", true, ""}};
+    return pads;
 }
 
 platform_caps::caps_t get_capabilities() { return {}; }

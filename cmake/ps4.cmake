@@ -74,7 +74,9 @@ add_executable(prospero_sunshine_ps4 "${CMAKE_BINARY_DIR}/generated/cover_png.cp
     ${SUNSHINE_KEPT}
     "${MOONLIGHT_SRC}/src/RtspParser.c"
     src/sunshine/main_ps4.cpp src/sunshine/video_ps4.cpp src/sunshine/process_ps4.cpp src/sunshine/platform_ps4.cpp
-    src/sunshine/pin_page_ps4.cpp src/sunshine/stubs_ps5.cpp src/apps/titles.cpp)
+    src/sunshine/pin_page_ps4.cpp src/sunshine/stubs_ps5.cpp src/apps/titles.cpp
+    src/platform/ps5/pad.c  # native /dev/hid virtual controller, shared with the PS5 host
+    src/platform/ps4/scepad_inject.c)  # per-frame controller input via libScePad
 # As on the PS5: Sunshine includes its own headers as "src/..." and "..."; FFmpeg's internal headers include a "config.h"
 # that must not resolve to Sunshine's, hence -idirafter for the Sunshine tree.
 target_include_directories(prospero_sunshine_ps4 PRIVATE src "${SUNSHINE_SRC}" "${CMAKE_BINARY_DIR}/third-party")
@@ -99,4 +101,5 @@ target_link_libraries(prospero_sunshine_ps4 PRIVATE prospero_ps4_pbs prospero_ps
     dep::ssl dep::crypto dep::opus dep::enet dep::nanors dep::miniupnpc "-Wl,--end-group" c++experimental
     # libc++'s std::filesystem needs openat, unlinkat, fchmodat and pathconf, which only the libkernel_sys stub exports. At
     # run time the SDK's loader (crt/rtld.c) maps libkernel, libkernel_web and libkernel_sys to the same module.
-    kernel_sys)
+    kernel_sys
+    ScePad)  # scePadVirtualDeviceInsertData for controller input
