@@ -1,0 +1,170 @@
+ProsperoSunshine PS4 port: reconnect recovery (hard reset of retained capture state).
+
+Between Moonlight stream sessions the SceRemotePlay daemon that PBS injects into is
+torn down and respawned (observed pid 131 -> 135 across a disconnect/reconnect). The
+previous session's retained control context, remote-owner reference and
+init/uncertain flags then point at a process that no longer exists, and the
+"RemotePlay process replaced; refusing to touch replacement" guard, together with the
+teardown_quarantined latch, make that host process refuse every subsequent capture
+(begin/init return -1). A freshly loaded host succeeds only because these process-
+global values start at zero.
+
+This adds a hard reset that drops all retained ownership/quarantine state without
+issuing any remote call, so the next pbs_ps4_capture_begin re-attaches to the current
+SceRemotePlay exactly as a fresh host would. The host calls pbs_ps4_capture_reset()
+before each open. No behaviour changes for the first session in a process.
+
+--- a/payload/src/platform/ps4/system/control.c
++++ b/payload/src/platform/ps4/system/control.c
+@@ -61,6 +61,38 @@
+   return failed;
+ }
+ 
++/* ProsperoSunshine PS4 port: reconnect recovery. SceRemotePlay is torn down
++ * and respawned between capture sessions (observed pid 131 -> 135 across a
++ * Moonlight disconnect/reconnect). The retained control context, the
++ * remote_owner reference and the uncertain/init flags from the previous
++ * session then describe a process that no longer exists, yet the "process
++ * replaced; refusing to touch replacement" guard keeps the host quarantined
++ * until it is reloaded. A freshly loaded host succeeds precisely because
++ * these process-global values start at zero; this makes a reconnect start
++ * from the same clean slate. The next pbs_ps4_control() then re-runs
++ * pbs_inject_begin_preferred("SceRemotePlay") and attaches to the current
++ * daemon. Only call this once the previous session's teardown has been
++ * attempted: we are dropping our claim, not reclaiming a live reference. */
++void pbs_ps4_control_reset(FILE *log) {
++  if (log && (initialized || remote_owner_pid || remote_init_uncertain ||
++              capture_request_uncertain || remote_term_uncertain))
++    fprintf(log,
++            "RemotePlay control reset: dropping stale ownership owner=%d epoch=%llu init=%d uncertain(i=%d r=%d t=%d)\n",
++            (int)remote_owner_pid, (unsigned long long)remote_owner_epoch,
++            initialized, remote_init_uncertain, capture_request_uncertain,
++            remote_term_uncertain);
++  pbs_ps4_control_ctx_release();
++  initialized = 0;
++  remote_init_uncertain = 0;
++  capture_request_uncertain = 0;
++  remote_term_uncertain = 0;
++  remote_owner_pid = 0;
++  remote_owner_epoch = 0;
++  /* restore_pending[] is intentionally left alone: the debug gates are kernel
++   * patches that outlive SceRemotePlay's respawn and must still be restored
++   * if this process armed them. */
++}
++
+ int pbs_ps4_control_remote_init_pending(void) { return initialized; }
+ int pbs_ps4_control_remote_term_uncertain(void) { return remote_term_uncertain; }
+ int pbs_ps4_control_ownership_uncertain(void) {
+--- a/payload/src/platform/ps4/system/control.h
++++ b/payload/src/platform/ps4/system/control.h
+@@ -9,6 +9,11 @@
+  * Keep this context until SetStaticInfo(0)/Term and worker shutdown finish. */
+ pbs_inject_t *pbs_ps4_control_ctx(void);
+ int pbs_ps4_control_ctx_release(void);
++/* ProsperoSunshine PS4 port: drop all retained SceRemotePlay ownership and
++ * uncertain/init state so the next control phase re-attaches to the current
++ * (possibly respawned) daemon, as a freshly loaded host would. Call only
++ * after the previous session's teardown has been attempted. */
++void pbs_ps4_control_reset(FILE *log);
+ /* Page-aligned scratch validated by the most recent control attach. The
+  * capture backend tries it first (if still safely below the new RSP) before
+  * searching for a fresh page. */
+--- a/payload/src/platform/ps4/capture/remote.c
++++ b/payload/src/platform/ps4/capture/remote.c
+@@ -444,6 +444,31 @@
+   return failed;
+ }
+ 
++/* ProsperoSunshine PS4 port: reconnect recovery. Forget every cached attach
++ * detail so the next pbs_ps4_remote_capture_init() copies a freshly attached
++ * control context (a new SceRemotePlay pid after a respawn) instead of the
++ * stale one. The resolved fn_* / reader handles belonged to the previous
++ * daemon image and must be re-resolved. Any worker socket in a now-dead
++ * daemon is released with that process; against a still-live daemon the
++ * control-context release detaches it. Does not call into the tracee. */
++void pbs_ps4_remote_reset(void) {
++  attached = 0;
++  memset(&ctx, 0, sizeof ctx);
++  fn_init = fn_open = fn_start = fn_stop = fn_close = 0;
++  fn_info = fn_set_info = fn_static = 0;
++  fn_idle = 0;
++  fn_status = 0;
++  status_probe_attempted = 0;
++  native_context = 0;
++  fn_native_ensure = 0;
++  native_started = 0;
++#if PBS_PS4_EXPORTED_READ
++  memset(&export_reader, 0, sizeof export_reader);
++  memset(&audio_reader, 0, sizeof audio_reader);
++  fn_open_audio = 0;
++#endif
++}
++
+ /* Native ordering: a bounded readiness negotiation runs before OpenVideoEx.
+  * It is safe (GetStaticInfo only) and returns 0x80a70008 while the service
+  * class is not ready. PBS never writes the readiness word. */
+--- a/payload/src/platform/ps4/capture/remote.h
++++ b/payload/src/platform/ps4/capture/remote.h
+@@ -13,6 +13,11 @@
+ int pbs_ps4_remote_capture_init(void);
+ int pbs_ps4_remote_capture_active(void);
+ int pbs_ps4_remote_capture_end(void);
++/* ProsperoSunshine PS4 port: forget all cached attach state (fn_* handles,
++ * readers, the copied control context) so the next capture init re-attaches
++ * to the current SceRemotePlay. Call only after capture_end / with no active
++ * capture. */
++void pbs_ps4_remote_reset(void);
+ /* Release only lifecycle state acquired by PBS, before the foreign-session
+  * guard reads global RemotePlay status. Keep the tracing context attached. */
+ int pbs_ps4_remote_prepare_release(void);
+--- a/payload/src/platform/ps4/capture/capture.c
++++ b/payload/src/platform/ps4/capture/capture.c
+@@ -227,6 +227,34 @@
+ #endif
+ }
+ 
++/* ProsperoSunshine PS4 port: reconnect recovery. Clear the sticky
++ * process-global state that otherwise makes a host process that has streamed
++ * once refuse every later capture: teardown_quarantined and the
++ * control-layer ownership/uncertain flags. Between stream sessions
++ * SceRemotePlay is torn down and respawned, so the previous session's claims
++ * reference a dead process; dropping them lets the next pbs_ps4_capture_begin
++ * attach to the current daemon exactly as a freshly loaded host does. Call
++ * this before pbs_ps4_capture_begin, after the previous session's
++ * pbs_ps4_capture_end. It never issues a remote call, so it is safe even when
++ * the retained context points at a process that no longer exists. */
++void pbs_ps4_capture_reset(FILE *log) {
++  report = log;
++#if PBS_PS4_REMOTE_AVCAP
++  if (pbs_ps4_remote_capture_active()) pbs_ps4_remote_capture_end();
++  pbs_ps4_remote_reset();
++#endif
++  if (pbs_ps4_control_ctx()) pbs_ps4_control_ctx_release();
++  pbs_ps4_control_reset(log);
++  if (log && (teardown_quarantined || local_term_uncertain || configured || initialized))
++    fprintf(log,
++            "PS4 capture reset: clearing quarantine=%d term_uncertain=%d configured=%d initialized=%d\n",
++            teardown_quarantined, local_term_uncertain, configured, initialized);
++  teardown_quarantined = 0;
++  local_term_uncertain = 0;
++  configured = 0;
++  initialized = 0;
++}
++
+ int pbs_ps4_init(void) {
+   if (teardown_quarantined) {
+     fprintf(report, "PS4 capture init refused: previous teardown not complete\n");
+--- a/payload/src/platform/ps4/capture/capture.h
++++ b/payload/src/platform/ps4/capture/capture.h
+@@ -5,6 +5,11 @@
+ 
+ int pbs_ps4_capture_begin(FILE *log);
+ void pbs_ps4_capture_end(void);
++/* ProsperoSunshine PS4 port: clear sticky per-process quarantine/ownership
++ * state so a host that has already streamed can capture again after
++ * SceRemotePlay respawns (Moonlight disconnect/reconnect). Call before
++ * pbs_ps4_capture_begin, after the previous pbs_ps4_capture_end. */
++void pbs_ps4_capture_reset(FILE *log);
+ int pbs_ps4_init(void);
+ int pbs_ps4_term(void);
+ int pbs_ps4_open(void **handle, const void *params);

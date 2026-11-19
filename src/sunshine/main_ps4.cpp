@@ -2,6 +2,7 @@
 // The PS4 host's entry point; replaces Sunshine's main.cpp/entry_handler.cpp as main_ps5.cpp does on the PS5, with less
 // around it: the GameStream HTTP(S) and RTSP services, mDNS discovery and the pairing page. No control socket, web page,
 // UPnP or rest-mode recovery yet (main_ps5.cpp has them). It runs until the pairing page's "Stop host" (POST /api/quit).
+#include "platform/ps4/pbs_session.h"  // ps_pbs_shutdown: release the warm capture daemon on host exit
 #include "platform/ps5/mdns_responder.hpp"
 #include "sunshine/pin_page_ps4.hpp"
 #include "src/config.h"
@@ -127,6 +128,8 @@ int main(int argc, char *argv[]) {
     }
     task_pool.stop();
     task_pool.join();
+    // The stream is down (proc terminate above), so release the capture daemon we were holding warm across reconnects.
+    ps_pbs_shutdown();
     ps_diag_log("ProsperoSunshine: host stopped\n");
     // Returning from main doesn't end a payload on the PS4: the process stayed until the watchdog above ended it, 10 s
     // later and next to the next host. The services are down and the logs written, so it ends here.
