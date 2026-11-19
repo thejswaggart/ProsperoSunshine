@@ -6,6 +6,7 @@
 #include "capture/capture_session.hpp"
 #include "capture/replay_backend.hpp"
 #include "platform/ps4/pbs_backend.hpp"
+#include "platform/ps4/pbs_session.h"  // audio probe (temporary)
 #include "src/config.h"
 #include "src/file_handler.h"
 #include "src/globals.h"
@@ -159,9 +160,26 @@ void capture(safe::mail_t mail, config_t config, stream::session_t *channel_data
     else
         BOOST_LOG(info) << "PS4 capture: screen capture open, 1280x720@60, "sv << kbps << " kbit/s"sv;
 
+    // Audio probe (temporary): on the PBS path, open the game-audio channel and read a few frames in this same thread, so
+    // OpenAudio's config and ReadAudio are proven before the mic pipeline is built. Logged to pbs_capture.log.
+    bool audio_probe = false;
+    int audio_logged = 0;
+    std::vector<uint8_t> audio_buf;
+    if (!settings.replay) {
+        audio_probe = ps_pbs_audio_open() == 0;
+        if (audio_probe) audio_buf.resize(64 * 1024);
+    }
+
     int64_t next_index = 0;
     prospero::EncodedFrame frame;
     while (!shutdown_event->peek()) {
+        if (audio_probe) {
+            const int a = ps_pbs_audio_read(audio_buf.data(), audio_buf.size());
+            if (a != 0 && audio_logged < 8) {
+                ++audio_logged;
+                BOOST_LOG(info) << "PS4 audio probe: ReadAudio #"sv << audio_logged << " rc/len="sv << a;
+            }
+        }
         if (idr_events->peek()) {
             idr_events->pop();
             if (session.request_keyframe()) BOOST_LOG(warning) << "PS4 capture: keyframe request failed"sv;

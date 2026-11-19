@@ -28,6 +28,14 @@ int ps_pbs_keyframe(void);
 // then refuses the next begin until the host restarts: it won't risk two owners of the encoder).
 int ps_pbs_close(void);
 
+// Game audio on the running session (call after ps_pbs_open). Opens the Avcap audio channel (sceVshAvcapOpenAudioEx) with
+// the 16-byte config Remote Play itself uses (see ps_pbs_audio_open); 0 or a negative error (logged). ps_pbs_close closes it.
+int ps_pbs_audio_open(void);
+// The next audio frame into destination: its length, 0 when none ready, negative on error. Raw PCM. Not thread-safe with
+// ps_pbs_read: both drive the one injection context, so call them from the same thread or serialise them.
+int ps_pbs_audio_read(void *destination, size_t capacity);
+void ps_pbs_audio_close(void);
+
 #ifdef __cplusplus
 }
 #endif

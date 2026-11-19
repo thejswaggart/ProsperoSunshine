@@ -18,6 +18,7 @@
 
 static FILE *session_log;
 static void *handle;
+static void *audio_handle;
 static int began, initialized, started;
 static uint64_t last_frame_ms;
 static uint64_t packets;
@@ -36,6 +37,7 @@ static void note(const char *format, const char *what, int value) {
 
 int ps_pbs_close(void) {
     int failed = 0;
+    ps_pbs_audio_close();  // release the audio channel before the video session
     if (started) {
         const int rc = pbs_ps4_stop(handle);
         note("%s -> %08x\n", "Stop", rc);
@@ -207,4 +209,36 @@ int ps_pbs_keyframe(void) {
     const int rc = pbs_ps4_keyframe(handle);
     if (rc < 0) note("%s -> %08x\n", "Keyframe", rc);
     return rc < 0 ? -1 : 0;
+}
+
+int ps_pbs_audio_open(void) {
+    if (!started || audio_handle) return -1;
+    // 16-byte OpenAudioEx config, taken verbatim from a live Remote Play session (ps4debug on SceRemotePlay pid 47: found
+    // remoteplay's call site OpenAudioEx(&handle, &obj+0x204) and read the exact bytes it passes — three live buffers all
+    // agreed). RemotePlay uses OpenAudioEx, NOT the plain OpenAudio, and this is the config the AV service accepts:
+    //   [0x00]=0  [0x04]=0  [0x08]=1  [0x0C]=0x1f400 (128000)
+    // +0x04 is 0 here, so the libSceAvcap config[+4]==2 branch (which needs extra caller setup we don't have — the source
+    // of our earlier 0x80a90005) is skipped; this is the normal full game-audio session. pbs_ps4_audio_open resolves
+    // sceVshAvcapOpenAudioEx and Starts the returned handle, as RemotePlay does.
+    static const uint8_t config[16] = {
+        0x00, 0x00, 0x00, 0x00,  // [0x00] = 0
+        0x00, 0x00, 0x00, 0x00,  // [0x04] = 0
+        0x01, 0x00, 0x00, 0x00,  // [0x08] = 1
+        0x00, 0xf4, 0x01, 0x00,  // [0x0C] = 128000 (0x1f400)
+    };
+    const int rc = pbs_ps4_audio_open(&audio_handle, config, sizeof config);
+    note("%s -> %08x\n", "audio open", rc);  // PBS logs the handle and the OpenAudioEx/Start return codes
+    return rc < 0 ? rc : 0;
+}
+
+int ps_pbs_audio_read(void *destination, size_t capacity) {
+    if (!audio_handle) return -1;
+    unsigned char info[0x40] = {0};
+    return pbs_ps4_audio_read(audio_handle, destination, capacity, info);
+}
+
+void ps_pbs_audio_close(void) {
+    if (!audio_handle) return;
+    pbs_ps4_audio_close(audio_handle);
+    audio_handle = NULL;
 }

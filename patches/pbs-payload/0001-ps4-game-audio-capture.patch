@@ -1,0 +1,182 @@
+PS4 game-audio capture for the ProsperoSunshine port.
+
+PBS's PS4 backend captures video only (it sets audio to "none"). libSceAvcap also
+exports sceVshAvcapOpenAudioEx / sceVshAvcapReadAudio (confirmed on fw 14.00), and the
+audio handle is Started like the video handle. Disassembly of libSceAvcap shows ReadAudio
+is mechanically identical to ReadVideo (same nonblocking ring read), so the existing
+worker export-reader serves audio verbatim once pointed at ReadAudio.
+
+RemotePlay uses OpenAudioEx (not the plain OpenAudio): the two stubs differ only in one
+byte passed to the shared open worker (OpenAudio=1, OpenAudioEx=0). ps4debug on a live
+Remote Play session (SceRemotePlay pid 47) located remoteplay's own call site
+OpenAudioEx(&handle, &obj+0x204) and read the exact 16-byte config it passes:
+  [0x00]=0  [0x04]=0  [0x08]=1  [0x0C]=0x1f400 (128000)
++0x04 is 0, so the libSceAvcap config[+4]==2 branch (extra shared-handle setup, needing
+caller cooperation we never provided — the cause of the earlier 0x80a90005) is skipped;
+this is the normal full game-audio session. The caller supplies those bytes (see
+ps_pbs_audio_open in pbs_session.c).
+
+This adds, all inside the authorized SceRemotePlay worker context:
+  - export_reader: a symbol variant so a reader can bind sceVshAvcapReadAudio.
+  - remote.c: pbs_ps4_remote_audio_open/read/close (OpenAudioEx with a caller-supplied
+    config, its own Start, exported ReadAudio, Stop/Close).
+  - capture.c/.h: pbs_ps4_audio_open/read/close dispatching to the remote backend.
+
+--- a/payload/src/platform/ps4/capture/export_reader.c
++++ b/payload/src/platform/ps4/capture/export_reader.c
+@@ -15,10 +15,10 @@
+   return rc;
+ }
+ 
+-int pbs_ps4_export_reader_init(pbs_ps4_export_reader *r, pbs_inject_t *ctx) {
++int pbs_ps4_export_reader_init_symbol(pbs_ps4_export_reader *r, pbs_inject_t *ctx, const char *read_symbol) {
+   if (!r || !ctx || !ctx->worker || ctx->asserted || r->buffer ||
+       ctx->scratch <= 0 || ctx->scratch_len < META_OFFSET + META_SIZE) return -1;
+-  r->read = pbs_resolve_in(ctx->pid, "libSceAvcap.sprx", "sceVshAvcapReadVideo");
++  r->read = pbs_resolve_in(ctx->pid, "libSceAvcap.sprx", read_symbol);
+   r->allocate = pbs_resolve_in(ctx->pid, "libSceLibcInternal.sprx", "malloc");
+   r->release = pbs_resolve_in(ctx->pid, "libSceLibcInternal.sprx", "free");
+   if (!r->read || !r->allocate || !r->release) return -1;
+@@ -85,3 +85,8 @@
+   memset(r, 0, sizeof *r);
+   return 0;
+ }
++
++/* ProsperoSunshine PS4 port: the original fixed-video initializer, in terms of the symbol variant above. */
++int pbs_ps4_export_reader_init(pbs_ps4_export_reader *r, pbs_inject_t *ctx) {
++  return pbs_ps4_export_reader_init_symbol(r, ctx, "sceVshAvcapReadVideo");
++}
+--- a/payload/src/platform/ps4/capture/export_reader.h
++++ b/payload/src/platform/ps4/capture/export_reader.h
+@@ -9,6 +9,7 @@
+ } pbs_ps4_export_reader;
+ 
+ int pbs_ps4_export_reader_init(pbs_ps4_export_reader *r, pbs_inject_t *ctx);
++int pbs_ps4_export_reader_init_symbol(pbs_ps4_export_reader *r, pbs_inject_t *ctx, const char *read_symbol);
+ int pbs_ps4_export_reader_read(pbs_ps4_export_reader *r, pbs_inject_t *ctx,
+                              void *handle, void *out, size_t size, void *info,
+                              int flags);
+--- a/payload/src/platform/ps4/capture/remote.c
++++ b/payload/src/platform/ps4/capture/remote.c
+@@ -32,6 +32,9 @@
+ #if PBS_PS4_EXPORTED_READ
+ #include "platform/ps4/capture/export_reader.h"
+ static pbs_ps4_export_reader export_reader;
++/* ProsperoSunshine PS4 port: game audio on the same session (sceVshAvcapOpenAudioEx/ReadAudio). */
++static pbs_ps4_export_reader audio_reader;
++static intptr_t fn_open_audio;
+ #else
+ #include "platform/ps4/capture/ring.h"
+ #endif
+@@ -1051,3 +1054,57 @@
+   return remote_rc(pbs_inject_call_fast(&ctx, fn_set_info,
+                                         (uint64_t[6]){(uint64_t)handle, 3, 0, 0, 0, 0}));
+ }
++
++/* ProsperoSunshine PS4 port: game-audio capture on the running session. OpenAudioEx takes a 16-byte caller-supplied config
++ * (RemotePlay's exact bytes; see ps_pbs_audio_open) and returns its own handle; the handle is then Started, Read (exported
++ * ReadAudio, same worker path as video) and Stop/Close like the video channel. Serialise audio and video reads externally:
++ * both drive the one shared injection context. */
++int pbs_ps4_remote_audio_open(void **handle, const void *config, size_t config_size) {
++  if (!remote_ready() || !handle || !config || config_size == 0 || config_size > 0x40) return -1;
++  *handle = 0;
++  if (!fn_open_audio) {
++    fn_open_audio = pbs_resolve_in(ctx.pid, "libSceAvcap.sprx", "sceVshAvcapOpenAudioEx");
++    if (!fn_open_audio) { fprintf(report, "Remote Avcap OpenAudioEx unresolved\n"); return -1; }
++  }
++  if (!audio_reader.read &&
++      pbs_ps4_export_reader_init_symbol(&audio_reader, &ctx, "sceVshAvcapReadAudio")) {
++    fprintf(report, "Remote Avcap audio reader (ReadAudio) unavailable\n");
++    return -1;
++  }
++  uint64_t out_handle = 0xa5a5a5a5a5a5a5a5ULL;
++  if (pbs_inject_write_at(&ctx, ctx.scratch + PBS_PS4R_REQUEST_OFF, config, config_size) ||
++      pbs_inject_write_at(&ctx, ctx.scratch + PBS_PS4R_HANDLE_OFF, &out_handle, sizeof out_handle)) {
++    fprintf(report, "Remote Avcap OpenAudio scratch write failed\n");
++    return -1;
++  }
++  long rc = pbs_inject_call_fast(&ctx, fn_open_audio, (uint64_t[6]){
++      (uint64_t)(ctx.scratch + PBS_PS4R_HANDLE_OFF),
++      (uint64_t)(ctx.scratch + PBS_PS4R_REQUEST_OFF), 0, 0, 0, 0});
++  pbs_inject_ensure_stopped(&ctx);
++  if (pbs_inject_read_at(&ctx, ctx.scratch + PBS_PS4R_HANDLE_OFF, &out_handle, sizeof out_handle)) out_handle = 0;
++  fprintf(report, "Remote Avcap OpenAudio rc=%016llx handle=%016llx\n",
++          (unsigned long long)rc, (unsigned long long)out_handle);
++  if (remote_rc(rc) < 0 || !out_handle || out_handle == 0xa5a5a5a5a5a5a5a5ULL)
++    return remote_rc(rc) < 0 ? remote_rc(rc) : -1;
++  long srt = pbs_inject_call_fast(&ctx, fn_start, (uint64_t[6]){out_handle, 0, 0, 0, 0, 0});
++  fprintf(report, "Remote Avcap audio Start rc=%016llx\n", (unsigned long long)srt);
++  if (remote_rc(srt) < 0) {
++    pbs_inject_call_fast(&ctx, fn_close, (uint64_t[6]){out_handle, 0, 0, 0, 0, 0});
++    return remote_rc(srt);
++  }
++  *handle = (void *)(intptr_t)out_handle;
++  return 0;
++}
++
++int pbs_ps4_remote_audio_read(void *handle, void *out, size_t size, void *info) {
++  if (!remote_ready() || !handle) return -1;
++  return pbs_ps4_export_reader_read(&audio_reader, &ctx, handle, out, size, info, 1);
++}
++
++int pbs_ps4_remote_audio_close(void *handle) {
++  if (!remote_ready() || !handle) return 0;
++  pbs_inject_call_fast(&ctx, fn_stop, (uint64_t[6]){(uint64_t)handle, 0, 0, 0, 0, 0});
++  long rc = pbs_inject_call_fast(&ctx, fn_close, (uint64_t[6]){(uint64_t)handle, 0, 0, 0, 0, 0});
++  fprintf(report, "Remote Avcap audio Stop/Close rc=%016llx\n", (unsigned long long)rc);
++  return remote_rc(rc);
++}
+--- a/payload/src/platform/ps4/capture/remote.h
++++ b/payload/src/platform/ps4/capture/remote.h
+@@ -26,3 +26,7 @@
+ int pbs_ps4_remote_read(void *handle, void *out, size_t size, void *info, int flags);
+ int pbs_ps4_remote_keyframe(void *handle);
+ int pbs_ps4_remote_status(unsigned char *status);
++/* ProsperoSunshine PS4 port: game audio on the running session. */
++int pbs_ps4_remote_audio_open(void **handle, const void *config, size_t config_size);
++int pbs_ps4_remote_audio_read(void *handle, void *out, size_t size, void *info);
++int pbs_ps4_remote_audio_close(void *handle);
+--- a/payload/src/platform/ps4/capture/capture.c
++++ b/payload/src/platform/ps4/capture/capture.c
+@@ -392,6 +392,18 @@
+   return pbs_ps4_remote_capture_active()
+              ? pbs_ps4_remote_keyframe(handle) : -1;
+ }
++/* ProsperoSunshine PS4 port: game audio on the running session (remote backend only). */
++int pbs_ps4_audio_open(void **handle, const void *config, size_t config_size) {
++  return pbs_ps4_remote_capture_active()
++             ? pbs_ps4_remote_audio_open(handle, config, config_size) : -1;
++}
++int pbs_ps4_audio_read(void *handle, void *out, size_t size, void *info) {
++  return pbs_ps4_remote_capture_active()
++             ? pbs_ps4_remote_audio_read(handle, out, size, info) : -1;
++}
++int pbs_ps4_audio_close(void *handle) {
++  return pbs_ps4_remote_capture_active() ? pbs_ps4_remote_audio_close(handle) : 0;
++}
+ #else
+ int pbs_ps4_open(void **handle, const void *params) { return open_video(handle, params); }
+ int pbs_ps4_start(void *handle) { return start(handle); }
+@@ -410,4 +422,12 @@
+   /* RemotePlay +2fb073 requests an intra frame using info type 3. */
+   return set_info(handle, 3, NULL, 0);
+ }
++/* ProsperoSunshine PS4 port: audio capture is only wired for the remote backend. */
++int pbs_ps4_audio_open(void **handle, const void *config, size_t config_size) {
++  (void)handle; (void)config; (void)config_size; return -1;
++}
++int pbs_ps4_audio_read(void *handle, void *out, size_t size, void *info) {
++  (void)handle; (void)out; (void)size; (void)info; return -1;
++}
++int pbs_ps4_audio_close(void *handle) { (void)handle; return 0; }
+ #endif
+--- a/payload/src/platform/ps4/capture/capture.h
++++ b/payload/src/platform/ps4/capture/capture.h
+@@ -28,3 +28,7 @@
+                                   unsigned char raw_output[0x28]);
+ int pbs_ps4_read(void *handle, void *out, size_t size, void *info, int flags);
+ int pbs_ps4_keyframe(void *handle);
++/* ProsperoSunshine PS4 port: game-audio capture on the running session (remote backend only). */
++int pbs_ps4_audio_open(void **handle, const void *config, size_t config_size);
++int pbs_ps4_audio_read(void *handle, void *out, size_t size, void *info);
++int pbs_ps4_audio_close(void *handle);
