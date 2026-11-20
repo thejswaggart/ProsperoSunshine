@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <arpa/inet.h>
 #include <filesystem>
 #include <fstream>
 #include <thread>
@@ -39,6 +40,13 @@ extern "C" {
 int sceKernelSetProcessName(const char *name);
 // patch 0003: resume SceRemotePlay if the host crashes while it is held under ptrace, so a crash can't freeze the console.
 void pbs_inject_emergency_detach(void);
+// On-screen system notification (the payload SDK's hello_world request; the message starts at byte 45). Shown on the
+// console's own screen so the operator sees the host is up and where to pair, without a second device.
+typedef struct {
+    char reserved[45];
+    char message[3075];
+} ps4_notify_request;
+int sceKernelSendNotificationRequest(int, ps4_notify_request *, size_t, int);
 }
 
 using namespace std::literals;
@@ -80,6 +88,23 @@ void crash_handler(int sig, siginfo_t *info, void *context) {
     crash_puts("\n");
     _exit(128 + sig);
 }
+// Put one line on the console's screen via the system notification queue.
+void ps4_notify(const std::string &text) {
+    ps4_notify_request request;
+    std::memset(&request, 0, sizeof request);
+    std::strncpy(request.message, text.c_str(), sizeof request.message - 1);
+    sceKernelSendNotificationRequest(0, &request, sizeof request, 0);
+}
+
+// "ProsperoSunshine is running. Pair at http://<console ip>:<port>" — the console's LAN address when it has one, else the
+// port alone (offline, or no usable interface yet).
+std::string pairing_notice(uint16_t pin_port) {
+    char ip[INET_ADDRSTRLEN] = {};
+    if (const auto lan = prospero::mdns::lan_address(); lan && inet_ntop(AF_INET, &*lan, ip, sizeof ip))
+        return "ProsperoSunshine is running. Pair at http://"s + ip + ":" + std::to_string(pin_port);
+    return "ProsperoSunshine is running. Pairing page on port "s + std::to_string(pin_port);
+}
+
 void install_crash_handler() {
     g_crash_fd = open((platf::appdata() / "host_diag.log").string().c_str(), O_WRONLY | O_APPEND | O_CREAT, 0666);
     struct sigaction sa;
@@ -167,6 +192,8 @@ int main(int argc, char *argv[]) {
             prospero::mdns::run_responder(stop, name, net::map_port(nvhttp::PORT_HTTP));
         });
         ps_diag_log("ProsperoSunshine: host ready, pairing page on port %u\n", static_cast<unsigned>(pin_port));
+        // Tell the operator, on the console's own screen, that the host is up and where to pair.
+        ps4_notify(pairing_notice(pin_port));
         while (!shutdown_event->view(5s)) {}
         BOOST_LOG(info) << "ProsperoSunshine host shutting down"sv;
         ps_diag_log("ProsperoSunshine: host stopping\n");

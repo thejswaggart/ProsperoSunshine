@@ -33,33 +33,6 @@ bool usable(in_addr a) {
     return v != 0 && (v >> 24) != 127 && (v >> 16) != 0xa9fe;  // not any, loopback or link-local
 }
 
-// LAN address: the one the default route would use (a connected UDP socket sends nothing), else the
-// first usable interface address.
-std::optional<in_addr> lan_address() {
-    if (const int s = socket(AF_INET, SOCK_DGRAM, 0); s >= 0) {
-        sockaddr_in peer{};
-        peer.sin_family = AF_INET;
-        peer.sin_port = htons(9);
-        inet_pton(AF_INET, "192.0.2.1", &peer.sin_addr);  // TEST-NET-1, never contacted
-        sockaddr_in local{};
-        socklen_t length = sizeof local;
-        const bool ok = connect(s, reinterpret_cast<sockaddr *>(&peer), sizeof peer) == 0 &&
-                        getsockname(s, reinterpret_cast<sockaddr *>(&local), &length) == 0 && usable(local.sin_addr);
-        close(s);
-        if (ok) return local.sin_addr;
-    }
-    std::optional<in_addr> found;
-    ifaddrs *list = nullptr;
-    if (getifaddrs(&list) != 0) return found;
-    for (auto *a = list; a && !found; a = a->ifa_next) {
-        if (!a->ifa_addr || a->ifa_addr->sa_family != AF_INET) continue;
-        const auto address = reinterpret_cast<const sockaddr_in *>(a->ifa_addr)->sin_addr;
-        if (usable(address)) found = address;
-    }
-    freeifaddrs(list);
-    return found;
-}
-
 class Socket {
 public:
     ~Socket() {
@@ -113,6 +86,33 @@ private:
     std::string error_;
 };
 
+}
+
+// LAN address: the one the default route would use (a connected UDP socket sends nothing), else the
+// first usable interface address. Public so the host can show it (e.g. the startup pairing notification).
+std::optional<in_addr> lan_address() {
+    if (const int s = socket(AF_INET, SOCK_DGRAM, 0); s >= 0) {
+        sockaddr_in peer{};
+        peer.sin_family = AF_INET;
+        peer.sin_port = htons(9);
+        inet_pton(AF_INET, "192.0.2.1", &peer.sin_addr);  // TEST-NET-1, never contacted
+        sockaddr_in local{};
+        socklen_t length = sizeof local;
+        const bool ok = connect(s, reinterpret_cast<sockaddr *>(&peer), sizeof peer) == 0 &&
+                        getsockname(s, reinterpret_cast<sockaddr *>(&local), &length) == 0 && usable(local.sin_addr);
+        close(s);
+        if (ok) return local.sin_addr;
+    }
+    std::optional<in_addr> found;
+    ifaddrs *list = nullptr;
+    if (getifaddrs(&list) != 0) return found;
+    for (auto *a = list; a && !found; a = a->ifa_next) {
+        if (!a->ifa_addr || a->ifa_addr->sa_family != AF_INET) continue;
+        const auto address = reinterpret_cast<const sockaddr_in *>(a->ifa_addr)->sin_addr;
+        if (usable(address)) found = address;
+    }
+    freeifaddrs(list);
+    return found;
 }
 
 void run_responder(std::stop_token stop, const std::string &name, uint16_t port) {
