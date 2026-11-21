@@ -2,9 +2,11 @@
 // The PS4 host's pairing page: a small plain-HTTP page on the base port + 1 (47990 by default) that lists the pending
 // pairing requests and passes the PIN Moonlight shows to nvhttp::pin(), as the PS5 host's control socket does with PIN.
 // Until the PS5 web page (src/web/) is ported it is the only way to pair. It also stops the host (POST /api/quit, the
-// PS5 control socket's QUIT), so a new build can be loaded without restarting the console. It answers the console itself
-// and the LAN only, never the internet: the PIN is the only thing that guards a pairing, and anyone on the LAN may stop
-// the host.
+// PS5 control socket's QUIT), so a new build can be loaded without restarting the console. By default it binds loopback
+// only, so pairing and quit answer the console itself and nobody else: the PIN is the only guard and Moonlight shows it
+// on the pairing device, so a LAN-reachable page would let anyone pair, and the bare /api/quit POST would let any page on
+// the network stop the host. An empty `pin_lan` file opens it to the LAN for development (ps4_deploy.sh's remote quit),
+// as control_lan does for the PS5 control socket; even then it is the LAN only, never the internet.
 #include "sunshine/pin_page_ps4.hpp"
 #include "src/config.h"
 #include "src/logging.h"
@@ -100,12 +102,14 @@ std::optional<nlohmann::json> json_body(const request_t &request) {
 }
 }
 
-void run_pin_page(std::stop_token stop, uint16_t port, std::function<void()> quit) {
+void run_pin_page(std::stop_token stop, uint16_t port, bool lan, std::function<void()> quit) {
     http_server server;
     server.config.port = port;
-    // As nvhttp binds: without an address Simple-Web-Server takes the IPv6 wildcard, which on the console's FreeBSD
-    // kernel accepts no IPv4 connections, so the page listened and nobody on an IPv4 network reached it.
-    server.config.address = net::get_bind_address(net::af_from_enum_string(config::sunshine.address_family));
+    // Default: loopback only, so the pairing page and /api/quit answer the console itself and no one on the network.
+    // With the pin_lan dev flag, bind the LAN interface as nvhttp does (without an address Simple-Web-Server takes the
+    // IPv6 wildcard, which on the console's FreeBSD kernel accepts no IPv4 connections, so an IPv4 network reached nobody).
+    server.config.address = lan ? net::get_bind_address(net::af_from_enum_string(config::sunshine.address_family))
+                                : std::string("127.0.0.1");
     // nvhttp::pin() waits for Moonlight to finish the handshake: a second thread keeps the list answering meanwhile.
     server.config.thread_pool_size = 2;
     server.resource["^/$"]["GET"] = lan_only([](response_t response, request_t) {

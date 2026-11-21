@@ -96,13 +96,16 @@ void ps4_notify(const std::string &text) {
     sceKernelSendNotificationRequest(0, &request, sizeof request, 0);
 }
 
-// "ProsperoSunshine is running. Pair at http://<console ip>:<port>" — the console's LAN address when it has one, else the
-// port alone (offline, or no usable interface yet).
-std::string pairing_notice(uint16_t pin_port) {
-    char ip[INET_ADDRSTRLEN] = {};
-    if (const auto lan = prospero::mdns::lan_address(); lan && inet_ntop(AF_INET, &*lan, ip, sizeof ip))
-        return "ProsperoSunshine is running. Pair at http://"s + ip + ":" + std::to_string(pin_port);
-    return "ProsperoSunshine is running. Pairing page on port "s + std::to_string(pin_port);
+// Where to tell the operator to pair. With the pin_lan dev flag the page is on the LAN, so show the console's address;
+// by default it is bound to loopback, so pairing is done in the console's own browser.
+std::string pairing_notice(uint16_t pin_port, bool pin_lan) {
+    if (pin_lan) {
+        char ip[INET_ADDRSTRLEN] = {};
+        if (const auto lan = prospero::mdns::lan_address(); lan && inet_ntop(AF_INET, &*lan, ip, sizeof ip))
+            return "ProsperoSunshine is running. Pair at http://"s + ip + ":" + std::to_string(pin_port);
+    }
+    return "ProsperoSunshine is running. To pair, open http://127.0.0.1:"s + std::to_string(pin_port) +
+           " in the PS4 browser.";
 }
 
 void install_crash_handler() {
@@ -181,19 +184,23 @@ int main(int argc, char *argv[]) {
     }
 
     const uint16_t pin_port = net::map_port(nvhttp::PORT_HTTP + 1);
+    // The pairing page binds loopback only (console-local pairing and quit) unless the operator drops an empty pin_lan
+    // file, which opens it to the LAN for development (ps4_deploy.sh's remote /api/quit), like control_lan on the PS5.
+    const bool pin_lan = std::filesystem::exists(platf::appdata() / "pin_lan", ec);
     {
         std::jthread http_thread{nvhttp::start};
         std::jthread rtsp_thread{rtsp_stream::start};
-        std::jthread pin_thread([pin_port, shutdown_event](std::stop_token stop) {
-            prospero::ps4::run_pin_page(stop, pin_port, [shutdown_event] { shutdown_event->raise(true); });
+        std::jthread pin_thread([pin_port, pin_lan, shutdown_event](std::stop_token stop) {
+            prospero::ps4::run_pin_page(stop, pin_port, pin_lan, [shutdown_event] { shutdown_event->raise(true); });
         });
         // Moonlight discovery; on any socket problem the responder logs and ends, the host runs on.
         std::jthread mdns_thread([name = config::nvhttp.sunshine_name](std::stop_token stop) {
             prospero::mdns::run_responder(stop, name, net::map_port(nvhttp::PORT_HTTP));
         });
-        ps_diag_log("ProsperoSunshine: host ready, pairing page on port %u\n", static_cast<unsigned>(pin_port));
+        ps_diag_log("ProsperoSunshine: host ready, pairing page on port %u (%s)\n", static_cast<unsigned>(pin_port),
+                    pin_lan ? "LAN" : "loopback");
         // Tell the operator, on the console's own screen, that the host is up and where to pair.
-        ps4_notify(pairing_notice(pin_port));
+        ps4_notify(pairing_notice(pin_port, pin_lan));
         while (!shutdown_event->view(5s)) {}
         BOOST_LOG(info) << "ProsperoSunshine host shutting down"sv;
         ps_diag_log("ProsperoSunshine: host stopping\n");

@@ -8,7 +8,9 @@
 namespace prospero::ps4 {
 
 // Serves the pairing page on `port` until `stop` is requested. Logs and returns when the port can't be bound.
-// quit: called once the page's "Stop host" (POST /api/quit) has been answered; it should stop the host.
-void run_pin_page(std::stop_token stop, uint16_t port, std::function<void()> quit);
+// lan: false (the default for a release) binds loopback only, so pairing and /api/quit are reachable from the console
+// itself, not from anyone on the LAN; true binds the LAN interface (the `pin_lan` dev flag) so a dev host can be paired
+// and stopped remotely (ps4_deploy.sh). quit: called once the page's "Stop host" (POST /api/quit) has been answered.
+void run_pin_page(std::stop_token stop, uint16_t port, bool lan, std::function<void()> quit);
 
 }
