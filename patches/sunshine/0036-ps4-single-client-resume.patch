@@ -4,38 +4,45 @@ The PS4 host has one PBS capture channel and one virtual controller, so only one
 already refuses a second client while the app runs ("An app is already running on this host"), but resume() inherited the
 PS5 join path from 0013-join-with-matching-hdr: a different paired device that picks "Resume" on the busy host was let
 through, because video::hdr_conflict() is a stub on PS4 (one channel, no HDR conflict to report). Two sessions against the
-single warm PBS capture then race for frames and thrash the one virtual pad. Refuse the join here instead, with a message
-Moonlight shows. Same-cert resume (an ordinary reconnect) has session_count_except_cert() == 0 and is unaffected. With
-this, two different-cert sessions can never coexist, so the quit-with-another-player branch (0012) is unreachable on PS4.
+single warm PBS capture then race for frames and thrash the one virtual pad.
+
+scripts/deps.sh applies patches/sunshine/ for both consoles and the PS5 compiler defines __SCE__ too, so the change is
+split by target: the PS4 refusal is under #ifdef __ORBIS__, and the PS5's join-with-matching-hdr logic is kept verbatim in
+the #else, so a PS5 build behaves exactly as before. Same-cert resume (an ordinary reconnect) has
+session_count_except_cert() == 0 and is unaffected on both. With this, two different-cert sessions can never coexist on the
+PS4, so the quit-with-another-player branch (0012) is unreachable there.
 
 --- a/src/nvhttp.cpp
 +++ b/src/nvhttp.cpp
-@@ -1792,20 +1792,15 @@
+@@ -1792,10 +1792,20 @@
      }
  
  #ifdef __SCE__
 -    // A device that joins another device's stream gets its picture, unless a capture channel of its own is free. One that
 -    // asks for another dynamic range than every running stream while none is free is turned away here, where Moonlight
 -    // shows the reason, and not after its stream has started.
-+    // ProsperoSunshine PS4: one capture channel and one virtual pad, so only one device streams at a time. A different
-+    // device that picks "Resume" on the busy host is refused here, with a message Moonlight shows, instead of joining and
-+    // racing the running device for capture frames and the controller. Same-cert resume (a reconnect) is not caught here.
++    // A second device that asks to join while another is already streaming, turned away here (where Moonlight shows the
++    // reason) rather than after its stream has started. The PS5 lets it join a running stream with its dynamic range, or
++    // take the free second capture channel, and refuses only on an HDR mismatch; the PS4 has one capture channel and one
++    // virtual pad, so it is refused outright.
      if (rtsp_stream::session_count_except_cert(client->cert) > 0) {
--      const bool wants_hdr = util::from_view(get_arg(args, "hdrMode", "0")) != 0;
--      if (const auto running_hdr = video::hdr_conflict(wants_hdr)) {
--        BOOST_LOG(warning) << "Resume refused: both capture channels run "sv << (*running_hdr ? "in HDR"sv : "without HDR"sv);
--        tree.put("root.resume", 0);
--        tree.put("root.<xmlattr>.status_code", 409);
--        tree.put("root.<xmlattr>.status_message", *running_hdr ?
--          "Another device is streaming in HDR. Turn HDR on in Moonlight to join." :
--          "Another device is streaming without HDR. Turn HDR off in Moonlight to join.");
--        return;
--      }
++#ifdef __ORBIS__
++      // ProsperoSunshine PS4: one capture channel and one virtual pad, so only one device streams at a time. Refuse the
++      // join instead of racing the running device for frames and the controller. Same-cert resume (reconnect) isn't here.
 +      BOOST_LOG(warning) << "Resume refused: another device is already streaming (single capture channel)"sv;
 +      tree.put("root.resume", 0);
 +      tree.put("root.<xmlattr>.status_code", 409);
 +      tree.put("root.<xmlattr>.status_message", "Another device is already streaming this host. Only one device can connect at a time.");
 +      return;
++#else
+       const bool wants_hdr = util::from_view(get_arg(args, "hdrMode", "0")) != 0;
+       if (const auto running_hdr = video::hdr_conflict(wants_hdr)) {
+         BOOST_LOG(warning) << "Resume refused: both capture channels run "sv << (*running_hdr ? "in HDR"sv : "without HDR"sv);
+@@ -1806,6 +1816,7 @@
+           "Another device is streaming without HDR. Turn HDR off in Moonlight to join.");
+         return;
+       }
++#endif
      }
  #endif
  
