@@ -20,10 +20,12 @@ src/net/upnp_client.cpp|if (!before.router.empty()) BOOST_LOG(info) << "UPnP: th
 src/sunshine/main_ps5.cpp|BOOST_LOG(info) << "remote_log: each log line also goes to "sv << remote << " (UDP syslog)"sv;
 src/sunshine/main_ps5.cpp|BOOST_LOG(warning) << "remote_log: no socket for "sv << remote << "; nothing is sent"sv;
 
-# The name of the game or app in front: sunshine.log keeps it (a bug about one game needs it), the report hides it ('Session app [<title>]').
+# The name of the game or app in front: sunshine.log keeps it (a bug about one game needs it), the report hides it ('Session app [<title>]'). On the PS4 the app is the fixed "PS4 Screen".
 src/sunshine/process_ps5.cpp|BOOST_LOG(info) << "Session app ["sv << _app.name << "] marked running"sv;
 src/sunshine/process_ps5.cpp|BOOST_LOG(info) << "Session app ["sv << _app.name << "] resumed"sv;
 src/sunshine/process_ps5.cpp|if (placebo) BOOST_LOG(info) << "Session app ["sv << _app.name << "] stopped"sv;
+src/sunshine/process_ps4.cpp|BOOST_LOG(info) << "Session app ["sv << _app.name << "] marked running"sv;
+src/sunshine/process_ps4.cpp|if (placebo) BOOST_LOG(info) << "Session app ["sv << _app.name << "] stopped"sv;
 
 # A file name, a number, a reason or the text of an exception: no address, no name of a person (read in the code). 'keyboard_profiles.txt' lines quote what the user wrote in that file; the name of a keyboard profile is the user's own word for a game's layout.
 patches/sunshine/0003-httpcommon-no-curl.patch|BOOST_LOG(warning) << "download_file is unavailable on the PS5: "sv << url;
@@ -40,6 +42,8 @@ patches/sunshine/0032-serve-on-and-no-content.patch|BOOST_LOG(error) << "HTTP se
 patches/sunshine/0032-serve-on-and-no-content.patch|BOOST_LOG(error) << "HTTP server on port "sv << web_server->config.port << ": "sv << err.what() << ", serving on"sv;
 patches/sunshine/0032-serve-on-and-no-content.patch|BOOST_LOG(fatal) << "Couldn't start http server on port "sv << web_server->config.port << ": "sv << err.what();
 src/platform/ps5/capture.c|if (after->failed[i] && !before->failed[i]) ps_diag_log("ProsperoSunshine: experimental disabled feature=%s\n", ps_exp_switch_at(i)->name);
+src/sunshine/pin_page_ps4.cpp|BOOST_LOG(error) << "Pairing page: can't listen on port "sv << port << ": "sv << e.what();
+src/sunshine/platform_ps4.cpp|BOOST_LOG(info) << "PS4 input: virtual DualShock 4 added, device id "sv << ps_pad_device_id(pad) << " for global index "sv << id.globalIndex << " (scePadInit rc="sv << init_rc << ')' << (user == PS_PAD_NO_USER ? "; pick a profile on the console"sv : ""sv);
 src/sunshine/platform_ps5.cpp|BOOST_LOG(info) << "PS5 audio: 12-channel levels (RMS, channel 0 to 11):"sv << line;
 src/sunshine/platform_ps5.cpp|if (const auto line = hub_.meter.line(now, static_cast<int>(hub_.mics.size()))) BOOST_LOG(debug) << *line;
 src/sunshine/platform_ps5.cpp|BOOST_LOG(info) << "PS5 virtual "sv << what << " of a device's profile seated ("sv << text << ')';
