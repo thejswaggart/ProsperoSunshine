@@ -174,7 +174,9 @@ void capture(safe::mail_t mail, config_t config, stream::session_t *channel_data
         BOOST_LOG(info) << "PS4 audio: capturing game audio (float32 stereo 48 kHz)"sv;
     }
 
-    int64_t next_index = 0;
+    // Number frames from 1: Moonlight drops frame 0, so starting at 0 would waste the opening IDR and the client would
+    // wait for a later keyframe before it had a picture (the same reason upstream numbers the PS5 stream from 1).
+    int64_t next_index = 1;
     prospero::EncodedFrame frame;
     while (!shutdown_event->peek()) {
         if (audio_open) {
