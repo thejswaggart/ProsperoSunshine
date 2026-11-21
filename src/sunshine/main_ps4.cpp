@@ -116,6 +116,7 @@ bool ps4_firmware_confirmed(uint32_t fw) {
     switch (fw & 0xffff0000u) {
         case 0x14000000u:  // 14.00
         case 0x13520000u:  // 13.52
+        case 0x09000000u:  // 9.00
             return true;
         default:
             return false;
@@ -194,7 +195,7 @@ int main(int argc, char *argv[]) {
         BOOST_LOG(info) << "Firmware "sv << ps4_firmware_text(fw) << " is confirmed"sv;
     else
         BOOST_LOG(warning) << "Firmware "sv << ps4_firmware_text(fw)
-                           << " is untested and experimental; the host patches the kernel, so it may be unstable (confirmed: 14.00, 13.52)"sv;
+                           << " is untested and experimental; the host patches the kernel, so it may be unstable (confirmed: 14.00, 13.52, 9.00)"sv;
 
     task_pool.start(1);
     auto shutdown_event = mail::man->event<bool>(mail::shutdown);
@@ -233,7 +234,7 @@ int main(int argc, char *argv[]) {
         // On an untested firmware, say so on the screen too: the host runs but patches the kernel, so it may be unstable.
         if (!ps4_firmware_confirmed(fw))
             ps4_notify("ProsperoSunshine: firmware "s + ps4_firmware_text(fw) +
-                       " is untested and may be unstable. Confirmed on 14.00 and 13.52.");
+                       " is untested and may be unstable. Confirmed on 14.00, 13.52 and 9.00.");
         while (!shutdown_event->view(5s)) {}
         BOOST_LOG(info) << "ProsperoSunshine host shutting down"sv;
         ps_diag_log("ProsperoSunshine: host stopping\n");

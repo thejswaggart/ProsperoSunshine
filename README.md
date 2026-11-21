@@ -9,8 +9,8 @@ PS4 screen, game audio and a controller over your LAN.
 > can't test or support the port.
 
 > **Status: 0.1.0 — experimental, but working for everyday streaming.** Picture, game audio and one controller work end to end
-> with Moonlight over the LAN. Confirmed on a **PS4 Pro (14.00)** and a **fat PS4 (13.52)**. A fat PS4 on **9.00** boots
-> and is under test. Other firmware may work but is untested: the host runs on any firmware whose kernel-layout scan
+> with Moonlight over the LAN. Confirmed on a **PS4 Pro (14.00)** and fat PS4s on **13.52** and **9.00**. Other firmware
+> may work but is untested: the host runs on any firmware whose kernel-layout scan
 > matches and warns, on the screen and in the log, when the firmware is untested — because it patches the kernel, an
 > untested one may be unstable.
 
@@ -20,10 +20,10 @@ PS4 screen, game audio and a controller over your LAN.
 | --- | --- |
 | **14.00** | ✅ Confirmed |
 | **13.52** | ✅ Confirmed |
+| **9.00** | ✅ Confirmed |
 | All others | ⚠️ Experimental — the host runs if its kernel-layout scan matches, but may be unstable |
 
-9.00 runs and looks good in early testing; it will move to **Confirmed** once it has had more hours on it. Firmware newer
-than 14.00 is untested too — support there depends on the kernel offsets in the SDK (see
+Firmware newer than 14.00 is untested — support there depends on the kernel offsets in the SDK (see
 [Building from source](#building-from-source)).
 
 ## What works
