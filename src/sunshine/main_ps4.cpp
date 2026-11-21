@@ -108,6 +108,25 @@ std::string pairing_notice(uint16_t pin_port, bool pin_lan) {
            " in the PS4 browser.";
 }
 
+// Firmware the host has been tested on. PBS_PS4_DYNAMIC_LAYOUT lets PBS attach on any firmware whose kernel-layout scan
+// matches, so the host runs on others too; but it patches the kernel, so an untested one may be unstable and is flagged
+// experimental, not blocked. The value is kernel_get_fw_version() masked to major.minor (0x14000000 == 14.00); add one
+// here once it has been tested on a console.
+bool ps4_firmware_confirmed(uint32_t fw) {
+    switch (fw & 0xffff0000u) {
+        case 0x14000000u:  // 14.00
+        case 0x13520000u:  // 13.52
+            return true;
+        default:
+            return false;
+    }
+}
+std::string ps4_firmware_text(uint32_t fw) {
+    char t[16];
+    std::snprintf(t, sizeof t, "%x.%02x", fw >> 24, (fw >> 16) & 0xff);
+    return t;
+}
+
 void install_crash_handler() {
     g_crash_fd = open((platf::appdata() / "host_diag.log").string().c_str(), O_WRONLY | O_APPEND | O_CREAT, 0666);
     struct sigaction sa;
@@ -144,10 +163,15 @@ int main(int argc, char *argv[]) {
     const auto klog = add_klog_sink();
     std::error_code ec;
     std::filesystem::create_directories(platf::appdata(), ec);
+    const uint32_t fw = kernel_get_fw_version();
     char header[160];
     std::snprintf(header, sizeof header, "ProsperoSunshine: PS4 host version=%s commit=%s firmware=%#x", PROJECT_VERSION,
-                  PROJECT_VERSION_COMMIT, kernel_get_fw_version());
+                  PROJECT_VERSION_COMMIT, fw);
     ps_diag_open((platf::appdata() / "host_diag.log").c_str(), header);
+    // The host runs on any firmware PBS's layout scan matches, but it patches the kernel, so only tested ones are safe;
+    // record which so a bug report says it plainly.
+    ps_diag_log("ProsperoSunshine: firmware %s (%s)\n", ps4_firmware_text(fw).c_str(),
+                ps4_firmware_confirmed(fw) ? "confirmed" : "experimental, may be unstable");
     // Catch fatal signals: resume SceRemotePlay (so a crash can't freeze the console) and record the fault, then exit.
     install_crash_handler();
     // config::parse copies a template apps.json from Sunshine's assets when none exists; there are no assets on the
@@ -166,6 +190,11 @@ int main(int argc, char *argv[]) {
     if (!log_guard) ps_diag_log("ProsperoSunshine: host logging failed to initialize\n");
     BOOST_LOG(info) << "ProsperoSunshine PS4 host "sv << PROJECT_VERSION << " (commit "sv << PROJECT_VERSION_COMMIT
                     << ") starting, data in "sv << platf::appdata().string();
+    if (ps4_firmware_confirmed(fw))
+        BOOST_LOG(info) << "Firmware "sv << ps4_firmware_text(fw) << " is confirmed"sv;
+    else
+        BOOST_LOG(warning) << "Firmware "sv << ps4_firmware_text(fw)
+                           << " is untested and experimental; the host patches the kernel, so it may be unstable (confirmed: 14.00, 13.52)"sv;
 
     task_pool.start(1);
     auto shutdown_event = mail::man->event<bool>(mail::shutdown);
@@ -201,6 +230,10 @@ int main(int argc, char *argv[]) {
                     pin_lan ? "LAN" : "loopback");
         // Tell the operator, on the console's own screen, that the host is up and where to pair.
         ps4_notify(pairing_notice(pin_port, pin_lan));
+        // On an untested firmware, say so on the screen too: the host runs but patches the kernel, so it may be unstable.
+        if (!ps4_firmware_confirmed(fw))
+            ps4_notify("ProsperoSunshine: firmware "s + ps4_firmware_text(fw) +
+                       " is untested and may be unstable. Confirmed on 14.00 and 13.52.");
         while (!shutdown_event->view(5s)) {}
         BOOST_LOG(info) << "ProsperoSunshine host shutting down"sv;
         ps_diag_log("ProsperoSunshine: host stopping\n");
