@@ -103,8 +103,8 @@ Toolchain: PS5 Payload SDK v0.45 in the Docker image `prosperosunshine-sdk:v0.45
 - Commit only when asked; never push without being asked.
 - Do not test rest mode on the console without asking first (risk to the homebrew environment). One test
   ended in a hung console that had to be switched off at the power button. Close all games first.
-- Publishing (push, GitHub release, store catalog PR, issue comments) needs the owner's OK each time. No
-  attribution lines for agents in commits or PRs.
+- Publishing (push, GitHub release, store catalog PR, issue comments) needs the owner's OK each time. Commits
+  and PRs carry the normal Claude Code attribution lines (the upstream author knows the port is made with Claude Code).
 - EULAs and terms of games and apps on the PS5 may be accepted for the owner; accounts, purchases and anything off the
   console still need asking. Don't save games.
 
