@@ -6,6 +6,7 @@
 #include "platform/ps4/audio_bridge.hpp"  // float ring filled by the capture thread, drained by the game-audio mic
 #include "platform/ps5/pad.h"  // native /dev/hid virtual controller, shared with the PS5 host
 #include "platform/ps4/scepad_inject.h"  // per-frame input via libScePad (the /dev/hid INSERT ioctl is rejected on PS4)
+#include "input/pad_touch.hpp"  // motion_accel/motion_gyro and the m/s²→g, deg/s→rad/s conversions (shared with the PS5 host)
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
@@ -294,7 +295,8 @@ public:
 std::unique_ptr<audio_control_t> audio_control() { return std::make_unique<silent_audio_control>(); }
 
 // Input: one native virtual DualShock 4 on /dev/hid (platform/ps5/pad.c, shared with the PS5 host), fed by Moonlight's
-// gamepad state. Keyboard, mouse, touch and motion are not forwarded yet. One controller at a time: a newly announced
+// gamepad state, including the DualShock 4 motion sensors (accelerometer and gyro; orientation is left level and the
+// touchpad is not forwarded yet). Keyboard and mouse are not forwarded. One controller at a time: a newly announced
 // controller replaces the open one (newest wins), so a reconnect — or a swap after a controller was powered off without
 // Moonlight sending a removal — takes over the slot instead of being refused. Every arrival/rebind/free is logged with its
 // Moonlight indices so we can see exactly what the client signals on a controller power-off.
@@ -302,6 +304,17 @@ struct input_raw_t {
     std::mutex mutex;
     ps_pad *pad = nullptr;
     int pad_nr = -1;  // the Moonlight global index that owns the pad
+    // Motion: a client only sends the sensors the host asks for, so the owning session's control-stream queue is kept to
+    // make that request, with the device-relative index the client echoes back in each motion packet. The latest sample
+    // is stamped into every injected frame (the PS4 input path is scePadVirtualDeviceInsertData, not the /dev/hid block,
+    // so the pad.c motion setters don't reach the game here). Rest is a level pad: no turn, gravity down.
+    feedback_queue_t feedback;
+    uint8_t client_index = 0;
+    float gyro[3] = {0, 0, 0};   // rad/s
+    float accel[3] = {0, 1, 0};  // g
+    // The last button/stick frame. Motion arrives in its own packets (gamepad_motion) between button/stick packets
+    // (gamepad_update), and each injected frame must carry a full state, so a motion-only update re-injects these.
+    ps_pad_state last{0, 128, 128, 128, 128, 0, 0};  // neutral: no buttons, centred sticks, no triggers
 };
 
 // Fully remove the virtual controller: libScePad's virtual-device entry first (scePadVirtualDeviceDeleteDevice), then the
@@ -313,6 +326,15 @@ static void close_virtual_pad(ps_pad *pad) {
     const int rc = ps_pad_close(pad);
     BOOST_LOG(info) << "PS4 input: virtual controller removed (scePadVirtualDeviceDeleteDevice rc="sv << del_rc
                     << ", /dev/hid rc="sv << rc << ')';
+}
+
+// Ask the client to start sending accelerometer and gyro at 100 Hz (as the PS5 host does). A client with no sensors
+// ignores it; a new or reconnected client must be asked anew, so this runs on every arrival and rebind. The caller holds
+// input_raw_t::mutex.
+static void request_motion(const input_raw_t &raw) {
+    if (!raw.feedback) return;
+    for (const uint8_t type : {prospero::moonlight::motion_accel, prospero::moonlight::motion_gyro})
+        raw.feedback->raise(gamepad_feedback_msg_t::make_motion_event_state(raw.client_index, type, 100));
 }
 
 void freeInput(input_raw_t *input) {
@@ -359,6 +381,15 @@ uint32_t to_ds4_buttons(uint32_t m) {
 }
 }  // namespace
 
+// Inject one full frame — the last button/stick state plus the latest motion — into the virtual pad. The /dev/hid INSERT
+// ioctl is rejected on PS4 (EIO); inject through libScePad, which works there, addressing the pad by the /dev/hid ADD
+// handle. Both gamepad_update (new buttons/sticks) and gamepad_motion (new sensors) call this, so motion reaches the game
+// even when no button or stick moves. The caller holds input_raw_t::mutex.
+static int inject_frame(const input_raw_t &raw) {
+    return ps_scepad_inject(static_cast<int32_t>(ps_pad_device_id(raw.pad)), raw.last.buttons, raw.last.lx, raw.last.ly,
+                            raw.last.rx, raw.last.ry, raw.last.l2, raw.last.r2, raw.gyro, raw.accel);
+}
+
 void gamepad_update(input_t &input, int nr, const gamepad_state_t &state) {
     auto raw = static_cast<input_raw_t *>(input.get());
     std::lock_guard lock(raw->mutex);
@@ -373,10 +404,8 @@ void gamepad_update(input_t &input, int nr, const gamepad_state_t &state) {
     s.ry = to_axis(-static_cast<int>(state.rsY));
     s.l2 = state.lt;
     s.r2 = state.rt;
-    // The /dev/hid INSERT ioctl is rejected on PS4 (EIO); inject through libScePad, which works there, addressing the pad
-    // by the /dev/hid ADD handle.
-    const int rc = ps_scepad_inject(static_cast<int32_t>(ps_pad_device_id(raw->pad)), s.buttons, s.lx, s.ly, s.rx, s.ry,
-                                    s.l2, s.r2);
+    raw->last = s;  // remembered so a motion-only update re-injects the same buttons and sticks
+    const int rc = inject_frame(*raw);
     static bool logged = false;
     if (!logged) {
         logged = true;
@@ -385,21 +414,60 @@ void gamepad_update(input_t &input, int nr, const gamepad_state_t &state) {
 }
 
 void gamepad_touch(input_t &, const gamepad_touch_t &) {}
-void gamepad_motion(input_t &, const gamepad_motion_t &) {}
+
+// Store the latest sensor sample for this pad; gamepad_update stamps it into the next injected frame. Sunshine gives
+// m/s² and deg/s; the pad takes g and rad/s. Orientation is not sent by Moonlight and is left level in the inject struct.
+void gamepad_motion(input_t &input, const gamepad_motion_t &motion) {
+    auto raw = static_cast<input_raw_t *>(input.get());
+    std::lock_guard lock(raw->mutex);
+    if (!raw->pad || motion.id.globalIndex != raw->pad_nr) return;
+    if (motion.motionType == prospero::moonlight::motion_accel) {
+        raw->accel[0] = prospero::accel_to_g(motion.x);
+        raw->accel[1] = prospero::accel_to_g(motion.y);
+        raw->accel[2] = prospero::accel_to_g(motion.z);
+        // One line, once, so the ordinary info log confirms accelerometer samples are arriving without the verbose flood.
+        static bool logged_accel = false;
+        if (!logged_accel) {
+            logged_accel = true;
+            BOOST_LOG(info) << "PS4 input: first accelerometer sample (g) "sv << raw->accel[0] << ", " << raw->accel[1]
+                            << ", " << raw->accel[2];
+        }
+    } else if (motion.motionType == prospero::moonlight::motion_gyro) {
+        raw->gyro[0] = prospero::gyro_to_rad(motion.x);
+        raw->gyro[1] = prospero::gyro_to_rad(motion.y);
+        raw->gyro[2] = prospero::gyro_to_rad(motion.z);
+        static bool logged_gyro = false;
+        if (!logged_gyro) {
+            logged_gyro = true;
+            BOOST_LOG(info) << "PS4 input: first gyro sample (rad/s) "sv << raw->gyro[0] << ", " << raw->gyro[1] << ", "
+                            << raw->gyro[2];
+        }
+    } else {
+        return;  // unknown motion type: nothing changed, no need to re-inject
+    }
+    // Push the updated sensors to the pad now, with the last buttons/sticks, so motion reaches the game between (or without
+    // any) button/stick packets. The motion request is 100 Hz per sensor; a cheap libScePad insert, no file I/O.
+    inject_frame(*raw);
+}
 void gamepad_battery(input_t &, const gamepad_battery_t &) {}
 void touch_update(client_input_t *, const touch_port_t &, const touch_input_t &) {}
 void pen_update(client_input_t *, const touch_port_t &, const pen_input_t &) {}
 
-int alloc_gamepad(input_t &input, const gamepad_id_t &id, const gamepad_arrival_t &, feedback_queue_t) {
+int alloc_gamepad(input_t &input, const gamepad_id_t &id, const gamepad_arrival_t &, feedback_queue_t feedback) {
     auto raw = static_cast<input_raw_t *>(input.get());
     std::lock_guard lock(raw->mutex);
+    // Keep the owning session's queue and the client-relative index so the motion request reaches this client.
+    raw->feedback = std::move(feedback);
+    raw->client_index = id.clientRelativeIndex;
     BOOST_LOG(info) << "PS4 input: gamepad arrival, global="sv << id.globalIndex << " clientIdx="sv
                     << static_cast<int>(id.clientRelativeIndex)
                     << (raw->pad ? " (a pad is already open for nr="s + std::to_string(raw->pad_nr) + ")"s : ""s);
     if (raw->pad) {
         if (raw->pad_nr == id.globalIndex) {
             // Same slot re-announced: keep the open pad rather than refuse, so a reconnect doesn't strand the controller.
+            // A reconnected client must be asked for motion again.
             BOOST_LOG(info) << "PS4 input: same global index re-announced; keeping the existing virtual controller"sv;
+            request_motion(*raw);
             return 0;
         }
         // A different controller arrived while one is open. We support one at a time, so the newest wins: replace the old
@@ -423,20 +491,31 @@ int alloc_gamepad(input_t &input, const gamepad_id_t &id, const gamepad_arrival_
     const int init_rc = ps_scepad_init();  // libScePad for the inject path; on PS4 this does not hang
     raw->pad = pad;
     raw->pad_nr = id.globalIndex;
+    // A fresh pad starts level: no turn, gravity down, buttons/sticks neutral, until the client's first samples arrive.
+    raw->gyro[0] = raw->gyro[1] = raw->gyro[2] = 0;
+    raw->accel[0] = raw->accel[2] = 0;
+    raw->accel[1] = 1;
+    raw->last = ps_pad_state{0, 128, 128, 128, 128, 0, 0};
     BOOST_LOG(info) << "PS4 input: virtual DualShock 4 added, device id "sv << ps_pad_device_id(pad) << " for global index "sv
                     << id.globalIndex << " (scePadInit rc="sv << init_rc << ')'
                     << (user == PS_PAD_NO_USER ? "; pick a profile on the console"sv : ""sv);
+    request_motion(*raw);
     return 0;
 }
 
-int rebind_gamepad(input_t &input, const gamepad_id_t &id, feedback_queue_t) {
+int rebind_gamepad(input_t &input, const gamepad_id_t &id, feedback_queue_t feedback) {
     auto raw = static_cast<input_raw_t *>(input.get());
     std::lock_guard lock(raw->mutex);
     BOOST_LOG(info) << "PS4 input: gamepad rebind, global="sv << id.globalIndex << " clientIdx="sv
                     << static_cast<int>(id.clientRelativeIndex)
                     << (raw->pad ? " (open pad nr="s + std::to_string(raw->pad_nr) + ")"s : " (no pad open)"s);
     // Single pad: if this is our controller's slot, keep it; otherwise there is nothing to rebind.
-    return (raw->pad && raw->pad_nr == id.globalIndex) ? 0 : -1;
+    if (!raw->pad || raw->pad_nr != id.globalIndex) return -1;
+    // A rebind carries a fresh feedback queue; keep it and re-request motion for the reconnected client.
+    raw->feedback = std::move(feedback);
+    raw->client_index = id.clientRelativeIndex;
+    request_motion(*raw);
+    return 0;
 }
 
 void free_gamepad(input_t &input, int nr) {
@@ -448,6 +527,7 @@ void free_gamepad(input_t &input, int nr) {
         close_virtual_pad(raw->pad);
         raw->pad = nullptr;
         raw->pad_nr = -1;
+        raw->feedback.reset();  // the session's queue goes with the pad
     } else if (raw->pad) {
         // Moonlight asked to free a slot that is not the one we hold. Log it (diagnostic): in the single-slot model this
         // means the removal index didn't match our pad, which would leave the controller stranded.
@@ -465,7 +545,10 @@ std::vector<supported_gamepad_t> &supported_gamepads(input_t *) {
     return pads;
 }
 
-platform_caps::caps_t get_capabilities() { return {}; }
+// Advertise controller touch+motion support (x-ss-general.featureFlags). The client gates LiSendControllerMotionEvent on
+// this flag (LI_FF_CONTROLLER_TOUCH_EVENTS), so without it no client ever sends accelerometer or gyro, however it is asked.
+// The same flag also enables controller touch events, which gamepad_touch() currently ignores — harmless, the data is dropped.
+platform_caps::caps_t get_capabilities() { return platform_caps::controller_touch; }
 
 namespace {
 class client_session final : public client_input_t {};

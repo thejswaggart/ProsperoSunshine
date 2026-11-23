@@ -31,7 +31,8 @@ Firmware newer than 14.00 is untested — support there depends on the kernel of
 - **Video:** the PS4 screen at **720p60, H.264** (no HEVC, HDR or 1080p/4K), captured through the console's own
   Remote Play encoder.
 - **Audio:** game audio in **stereo** at 48 kHz, through Sunshine's Opus path.
-- **Input:** **one** virtual DualShock 4 for the Moonlight gamepad.
+- **Input:** **one** virtual DualShock 4 for the Moonlight gamepad, including its **motion sensors** —
+  accelerometer and gyro — when the Moonlight client sends them.
 - **Reconnect:** disconnect and reconnect without reloading the payload — the capture is held warm across streams and a
   keyframe is resent, so reconnects are quick.
 - **App list:** a single **"PS4 Screen"** app with its own cover art.
@@ -96,6 +97,9 @@ reconnect as you like — the host holds the capture warm, so reconnecting is qu
 - **Stereo game audio only** — no surround.
 - **One controller**; no keyboard/mouse, no per-device profiles, no web page and no internet/UPnP streaming. Those are
   PS5-only features of upstream and are not part of this port.
+- **Motion is raw accelerometer and gyro only** — no fused orientation (Moonlight does not send one). It also depends on
+  the client forwarding motion: a sensor-capable controller (for example a DualShock 4 or DualSense over Bluetooth), or
+  the client device's own sensors (a phone). The touchpad is not forwarded.
 - **Untested firmware is experimental.** The host attaches on any firmware whose layout scan matches and warns when it is
   untested; because PBS patches the kernel, an untested firmware may be unstable.
 

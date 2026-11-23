@@ -20,9 +20,12 @@ int ps_scepad_init(void);
 int ps_scepad_remove(int32_t handle);
 
 /* Injects one frame into the virtual pad addressed by `handle` (the /dev/hid ADD handle, which equals the DeviceId
- * libScePad uses). buttons are PS_PAD_* bits; sticks and triggers are 0..255, 128 centre. The timestamp and counter are
- * stamped here because the PS4 de-dups an unchanged sample. Returns scePadVirtualDeviceInsertData's result. */
-int ps_scepad_inject(int32_t handle, uint32_t buttons, uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry, uint8_t l2, uint8_t r2);
+ * libScePad uses). buttons are PS_PAD_* bits; sticks and triggers are 0..255, 128 centre. `gyro` is angular velocity in
+ * rad/s and `accel` acceleration in g (a level pad at rest is gyro {0,0,0}, accel {0,1,0}); orientation is left level.
+ * The timestamp and counter are stamped here because the PS4 de-dups an unchanged sample. Returns
+ * scePadVirtualDeviceInsertData's result. */
+int ps_scepad_inject(int32_t handle, uint32_t buttons, uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry, uint8_t l2, uint8_t r2,
+                     const float gyro[3], const float accel[3]);
 
 #ifdef __cplusplus
 }
